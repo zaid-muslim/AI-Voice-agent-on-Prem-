@@ -23,6 +23,9 @@ trap cleanup EXIT INT TERM
 if ! curl -s -o /dev/null http://localhost:11434/api/tags; then
     echo "Warning: Ollama doesn't seem to be reachable on localhost:11434 — start it with 'ollama serve'."
 fi
+if ! curl -s -o /dev/null "http://localhost:1234/search?q=test&format=json"; then
+    echo "Warning: SearXNG doesn't seem to be reachable on localhost:1234 — web search will fail until it's up."
+fi
 
 echo "Starting Chatterbox Turbo TTS service..."
 "$CHATTERBOX_PY" -u chatterbox_server.py > "$CHATTERBOX_LOG" 2>&1 &

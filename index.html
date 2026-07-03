@@ -80,8 +80,6 @@ const statusEl = document.getElementById("status");
 
 let ws;
 let audioCtx;
-let mediaRecorder;
-let chunks = [];
 let currentAgentBubble = null;
 
 function setStatus(text) { statusEl.textContent = text; }
@@ -116,41 +114,61 @@ function base64ToArrayBuffer(b64) {
   return bytes.buffer;
 }
 
+function arrayBufferToBase64(buffer) {
+  let binary = "";
+  const bytes = new Uint8Array(buffer);
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+
+// Gapless playback: each decoded chunk is scheduled on the Web Audio clock to start
+// exactly when the previous one ends (this.nextTime), so sentences play back-to-back
+// with no JS-event-latency gaps. If a chunk arrives late (TTS underrun), it self-heals
+// by scheduling from "now" instead. A small lead (SCHEDULE_LEAD) absorbs jitter.
 class AudioQueue {
-  constructor() { this.queue = []; this.playing = false; this.currentSource = null; }
+  constructor() { this.nextTime = 0; this.sources = new Set(); this.SCHEDULE_LEAD = 0.15; this.playing = false; }
+  // Tell the server whether agent audio is actually playing. The server needs this
+  // because audio is scheduled ahead and keeps playing after generation finishes —
+  // it's what lets barge-in interrupt still-playing audio.
+  _setPlaying(playing) {
+    if (playing === this.playing) return;
+    this.playing = playing;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "playback_state", playing }));
+    }
+  }
   async enqueue(arrayBuffer) {
     const ctx = getAudioContext();
-    let decoded;
+    if (ctx.state === "suspended") { try { await ctx.resume(); } catch (e) { /* ignore */ } }
+    let buf;
     try {
-      decoded = await ctx.decodeAudioData(arrayBuffer);
+      buf = await ctx.decodeAudioData(arrayBuffer);
     } catch (err) {
       console.error("Audio chunk failed to decode, dropped:", arrayBuffer.byteLength, "bytes", err);
       setStatus("Warning: an audio chunk failed to play");
       return;
     }
-    this.queue.push(decoded);
-    if (!this.playing) this._playNext();
-  }
-  _playNext() {
-    if (!this.queue.length) { this.playing = false; this.currentSource = null; return; }
-    this.playing = true;
-    const ctx = getAudioContext();
-    const buf = this.queue.shift();
+    const startAt = Math.max(this.nextTime, ctx.currentTime + this.SCHEDULE_LEAD);
     const src = ctx.createBufferSource();
     src.buffer = buf;
     src.connect(ctx.destination);
-    src.onended = () => this._playNext();
-    this.currentSource = src;
-    src.start();
+    src.onended = () => {
+      this.sources.delete(src);
+      if (this.sources.size === 0) this._setPlaying(false);
+    };
+    this.sources.add(src);
+    src.start(startAt);
+    this.nextTime = startAt + buf.duration;
+    this._setPlaying(true);
   }
   stopAll() {
-    this.queue = [];
-    if (this.currentSource) {
-      this.currentSource.onended = null;
-      try { this.currentSource.stop(); } catch (err) { /* already stopped */ }
-      this.currentSource = null;
+    for (const src of this.sources) {
+      src.onended = null;
+      try { src.stop(); } catch (err) { /* already stopped */ }
     }
-    this.playing = false;
+    this.sources.clear();
+    this.nextTime = 0;
+    this._setPlaying(false);
   }
 }
 const audioQueue = new AudioQueue();
@@ -177,96 +195,67 @@ function connect() {
       await audioQueue.enqueue(wav);
     }
     if (msg.type === "done") {
-      setStatus("Ready");
+      setStatus(listening ? "Listening…" : "Ready");
       currentAgentBubble = null;
     }
     if (msg.type === "error") {
       setStatus("Error: " + msg.message);
     }
     if (msg.type === "interrupted") {
+      audioQueue.stopAll();
       currentAgentBubble = null;
+      setStatus(listening ? "Listening…" : "Ready");
     }
   };
 }
 connect();
 
-let stopRequested = false;
-let starting = false;
-let recordStartTime = 0;
-const MIN_RECORD_MS = 300;   // shorter than this is almost certainly an accidental tap
+// Real-time mode: mic streams continuously once toggled on. The server runs VAD
+// on the raw PCM stream, segments utterances by speech/silence, and auto-interrupts
+// the agent the instant it detects you've started talking (barge-in) — no button
+// press needed for either.
+let listening = false;
+let micStream = null;
+let captureCtx = null;   // separate AudioContext, forced to 16kHz to match the VAD/STT pipeline
+let workletNode = null;
 
-function interrupt() {
-  audioQueue.stopAll();
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: "interrupt" }));
-  }
-}
-
-async function startRecording() {
-  if (starting || (mediaRecorder && mediaRecorder.state !== "inactive")) return;
-  starting = true;
-  stopRequested = false;
-  interrupt();   // barge-in: cut off anything the agent is currently saying/generating
+async function startListening() {
+  if (listening) return;
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    chunks = [];
-    const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-      ? "audio/webm;codecs=opus"
-      : "";
-    mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-    mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
-    mediaRecorder.onstop = async () => {
-      const durationMs = Date.now() - recordStartTime;
-      stream.getTracks().forEach((t) => t.stop());
-      if (durationMs < MIN_RECORD_MS) {
-        console.log("Recording too short, discarding:", durationMs, "ms");
-        setStatus("Ready");
-        return;
-      }
-      const blob = new Blob(chunks, { type: mediaRecorder.mimeType || "audio/webm" });
-      const buf = await blob.arrayBuffer();
-      console.log("Recorded blob bytes:", buf.byteLength);
-      if (buf.byteLength === 0) {
-        setStatus("No audio captured — try again");
-      } else if (ws.readyState === WebSocket.OPEN) {
-        ws.send(buf);
-        setStatus("Thinking…");
-      } else {
-        setStatus("Not connected to server");
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
+    });
+    captureCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+    await captureCtx.audioWorklet.addModule("pcm-worklet.js");
+    const source = captureCtx.createMediaStreamSource(micStream);
+    workletNode = new AudioWorkletNode(captureCtx, "pcm-capture");
+    workletNode.port.onmessage = (event) => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(event.data);   // raw 20ms Int16 PCM frame
       }
     };
-    mediaRecorder.start();
-    recordStartTime = Date.now();
+    source.connect(workletNode);
+    listening = true;
     micBtn.classList.add("recording");
     setStatus("Listening…");
-    starting = false;
-    if (stopRequested) stopRecording();
   } catch (err) {
-    starting = false;
-    console.error("getUserMedia failed:", err);
+    console.error("Failed to start listening:", err);
     setStatus("Mic error: " + err.message);
   }
 }
 
-function stopRecording() {
-  if (starting) { stopRequested = true; return; }
-  if (mediaRecorder && mediaRecorder.state === "recording") {
-    mediaRecorder.stop();
-  }
+function stopListening() {
+  if (!listening) return;
+  if (workletNode) { workletNode.port.onmessage = null; workletNode.disconnect(); workletNode = null; }
+  if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
+  if (captureCtx) { captureCtx.close(); captureCtx = null; }
+  listening = false;
   micBtn.classList.remove("recording");
+  setStatus("Ready");
 }
 
-micBtn.addEventListener("mousedown", startRecording);
-micBtn.addEventListener("mouseup", stopRecording);
-micBtn.addEventListener("mouseleave", () => { if (mediaRecorder && mediaRecorder.state === "recording") stopRecording(); });
-micBtn.addEventListener("touchstart", (e) => { e.preventDefault(); startRecording(); });
-micBtn.addEventListener("touchend", (e) => { e.preventDefault(); stopRecording(); });
-
-document.addEventListener("keydown", (e) => {
-  if (e.code === "Space" && !e.repeat && (!mediaRecorder || mediaRecorder.state === "inactive")) startRecording();
-});
-document.addEventListener("keyup", (e) => {
-  if (e.code === "Space") stopRecording();
+micBtn.addEventListener("click", () => {
+  if (listening) stopListening(); else startListening();
 });
 
 const uploadBtn = document.getElementById("uploadBtn");
@@ -284,7 +273,7 @@ fileInput.addEventListener("change", async () => {
     setStatus("Empty file");
   } else if (ws.readyState === WebSocket.OPEN) {
     audioQueue.stopAll();
-    ws.send(buf);
+    ws.send(JSON.stringify({ type: "upload_audio", data: arrayBufferToBase64(buf) }));
     setStatus("Thinking…");
   } else {
     setStatus("Not connected to server");

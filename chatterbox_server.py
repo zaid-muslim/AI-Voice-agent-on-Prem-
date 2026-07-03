@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""Chatterbox Turbo TTS microservice — runs in its own venv (isolated from the
-main server.py env, which needs a different torch version for vLLM/Orpheus).
-server.py talks to this over HTTP, the same way it talks to Ollama."""
+
 import io
 
 import soundfile as sf
@@ -10,7 +8,7 @@ from chatterbox.tts_turbo import ChatterboxTurboTTS
 from fastapi import FastAPI, Response
 from pydantic import BaseModel
 
-REFERENCE_AUDIO = "reference_male.wav"
+REFERENCE_AUDIO = "reference_female.wav"
 PORT = 8766
 
 app = FastAPI()
