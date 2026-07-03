@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Voice Agent</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    max-width: 720px;
+    margin: 40px auto;
+    background: #0f1115;
+    color: #e6e6e6;
+    padding: 0 16px;
+  }
+  h1 { font-size: 1.4rem; font-weight: 600; }
+  #history {
+    border: 1px solid #2a2d34;
+    border-radius: 10px;
+    padding: 16px;
+    height: 420px;
+    overflow-y: auto;
+    background: #15181f;
+    margin-bottom: 16px;
+  }
+  .msg { margin-bottom: 12px; line-height: 1.4; }
+  .msg .who { font-weight: 600; }
+  .msg.you .who { color: #6ea8fe; }
+  .msg.agent .who { color: #8ee08e; }
+  #controls {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  #micBtn {
+    width: 84px;
+    height: 84px;
+    border-radius: 50%;
+    border: none;
+    background: #2a2d34;
+    color: #fff;
+    font-size: 1.6rem;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s, transform 0.1s;
+  }
+  #micBtn:active, #micBtn.recording {
+    background: #d9534f;
+    transform: scale(1.05);
+  }
+  #uploadBtn {
+    padding: 10px 16px;
+    border-radius: 8px;
+    border: 1px solid #2a2d34;
+    background: #1b1e25;
+    color: #e6e6e6;
+    font-size: 0.95rem;
+    cursor: pointer;
+  }
+  #uploadBtn:hover { background: #22262f; }
+  #status {
+    color: #9aa0a6;
+    font-size: 0.95rem;
+  }
+</style>
+</head>
+<body>
+  <h1>Voice Agent</h1>
+  <div id="history"></div>
+  <div id="controls">
+    <button id="micBtn">🎙</button>
+    <button id="uploadBtn" type="button">📁 Upload audio</button>
+    <input id="fileInput" type="file" accept="audio/*" style="display:none">
+    <div id="status">Connecting…</div>
+  </div>
+
+<script>
+const historyEl = document.getElementById("history");
+const micBtn = document.getElementById("micBtn");
+const statusEl = document.getElementById("status");
+
+let ws;
+let audioCtx;
+let mediaRecorder;
+let chunks = [];
+let currentAgentBubble = null;
+
+function setStatus(text) { statusEl.textContent = text; }
+
+function getAudioContext() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  return audioCtx;
+}
+
+function appendMessage(who, text) {
+  const div = document.createElement("div");
+  div.className = "msg " + (who === "You" ? "you" : "agent");
+  div.innerHTML = `<span class="who">${who}:</span> <span class="text"></span>`;
+  div.querySelector(".text").textContent = text;
+  historyEl.appendChild(div);
+  historyEl.scrollTop = historyEl.scrollHeight;
+  return div;
+}
+
+function appendAgentToken(text) {
+  if (!currentAgentBubble) {
+    currentAgentBubble = appendMessage("Agent", "");
+  }
+  currentAgentBubble.querySelector(".text").textContent += text;
+  historyEl.scrollTop = historyEl.scrollHeight;
+}
+
+function base64ToArrayBuffer(b64) {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+class AudioQueue {
+  constructor() { this.queue = []; this.playing = false; this.currentSource = null; }
+  async enqueue(arrayBuffer) {
+    const ctx = getAudioContext();
+    let decoded;
+    try {
+      decoded = await ctx.decodeAudioData(arrayBuffer);
+    } catch (err) {
+      console.error("Audio chunk failed to decode, dropped:", arrayBuffer.byteLength, "bytes", err);
+      setStatus("Warning: an audio chunk failed to play");
+      return;
+    }
+    this.queue.push(decoded);
+    if (!this.playing) this._playNext();
+  }
+  _playNext() {
+    if (!this.queue.length) { this.playing = false; this.currentSource = null; return; }
+    this.playing = true;
+    const ctx = getAudioContext();
+    const buf = this.queue.shift();
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(ctx.destination);
+    src.onended = () => this._playNext();
+    this.currentSource = src;
+    src.start();
+  }
+  stopAll() {
+    this.queue = [];
+    if (this.currentSource) {
+      this.currentSource.onended = null;
+      try { this.currentSource.stop(); } catch (err) { /* already stopped */ }
+      this.currentSource = null;
+    }
+    this.playing = false;
+  }
+}
+const audioQueue = new AudioQueue();
+
+function connect() {
+  ws = new WebSocket("ws://localhost:8765");
+  ws.binaryType = "arraybuffer";
+
+  ws.onopen = () => setStatus("Ready");
+  ws.onclose = () => { setStatus("Disconnected — retrying…"); setTimeout(connect, 2000); };
+  ws.onerror = () => setStatus("Connection error");
+
+  ws.onmessage = async (event) => {
+    const msg = JSON.parse(event.data);
+    if (msg.type === "transcript") {
+      appendMessage("You", msg.text);
+      currentAgentBubble = null;
+    }
+    if (msg.type === "token") {
+      appendAgentToken(msg.text);
+    }
+    if (msg.type === "audio") {
+      const wav = base64ToArrayBuffer(msg.data);
+      await audioQueue.enqueue(wav);
+    }
+    if (msg.type === "done") {
+      setStatus("Ready");
+      currentAgentBubble = null;
+    }
+    if (msg.type === "error") {
+      setStatus("Error: " + msg.message);
+    }
+    if (msg.type === "interrupted") {
+      currentAgentBubble = null;
+    }
+  };
+}
+connect();
+
+let stopRequested = false;
+let starting = false;
+let recordStartTime = 0;
+const MIN_RECORD_MS = 300;   // shorter than this is almost certainly an accidental tap
+
+function interrupt() {
+  audioQueue.stopAll();
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "interrupt" }));
+  }
+}
+
+async function startRecording() {
+  if (starting || (mediaRecorder && mediaRecorder.state !== "inactive")) return;
+  starting = true;
+  stopRequested = false;
+  interrupt();   // barge-in: cut off anything the agent is currently saying/generating
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    chunks = [];
+    const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+      ? "audio/webm;codecs=opus"
+      : "";
+    mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+    mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+    mediaRecorder.onstop = async () => {
+      const durationMs = Date.now() - recordStartTime;
+      stream.getTracks().forEach((t) => t.stop());
+      if (durationMs < MIN_RECORD_MS) {
+        console.log("Recording too short, discarding:", durationMs, "ms");
+        setStatus("Ready");
+        return;
+      }
+      const blob = new Blob(chunks, { type: mediaRecorder.mimeType || "audio/webm" });
+      const buf = await blob.arrayBuffer();
+      console.log("Recorded blob bytes:", buf.byteLength);
+      if (buf.byteLength === 0) {
+        setStatus("No audio captured — try again");
+      } else if (ws.readyState === WebSocket.OPEN) {
+        ws.send(buf);
+        setStatus("Thinking…");
+      } else {
+        setStatus("Not connected to server");
+      }
+    };
+    mediaRecorder.start();
+    recordStartTime = Date.now();
+    micBtn.classList.add("recording");
+    setStatus("Listening…");
+    starting = false;
+    if (stopRequested) stopRecording();
+  } catch (err) {
+    starting = false;
+    console.error("getUserMedia failed:", err);
+    setStatus("Mic error: " + err.message);
+  }
+}
+
+function stopRecording() {
+  if (starting) { stopRequested = true; return; }
+  if (mediaRecorder && mediaRecorder.state === "recording") {
+    mediaRecorder.stop();
+  }
+  micBtn.classList.remove("recording");
+}
+
+micBtn.addEventListener("mousedown", startRecording);
+micBtn.addEventListener("mouseup", stopRecording);
+micBtn.addEventListener("mouseleave", () => { if (mediaRecorder && mediaRecorder.state === "recording") stopRecording(); });
+micBtn.addEventListener("touchstart", (e) => { e.preventDefault(); startRecording(); });
+micBtn.addEventListener("touchend", (e) => { e.preventDefault(); stopRecording(); });
+
+document.addEventListener("keydown", (e) => {
+  if (e.code === "Space" && !e.repeat && (!mediaRecorder || mediaRecorder.state === "inactive")) startRecording();
+});
+document.addEventListener("keyup", (e) => {
+  if (e.code === "Space") stopRecording();
+});
+
+const uploadBtn = document.getElementById("uploadBtn");
+const fileInput = document.getElementById("fileInput");
+
+uploadBtn.addEventListener("click", () => fileInput.click());
+
+fileInput.addEventListener("change", async () => {
+  const file = fileInput.files[0];
+  fileInput.value = "";
+  if (!file) return;
+  const buf = await file.arrayBuffer();
+  console.log("Uploaded file bytes:", buf.byteLength, file.type);
+  if (buf.byteLength === 0) {
+    setStatus("Empty file");
+  } else if (ws.readyState === WebSocket.OPEN) {
+    audioQueue.stopAll();
+    ws.send(buf);
+    setStatus("Thinking…");
+  } else {
+    setStatus("Not connected to server");
+  }
+});
+</script>
+</body>
+</html>

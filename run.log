@@ -1,0 +1,12 @@
+/home/nauyan/miniconda3/lib/python3.13/site-packages/requests/__init__.py:113: RequestsDependencyWarning: urllib3 (2.5.0) or chardet (6.0.0.post1)/charset_normalizer (3.4.4) doesn't match a supported version!
+  warnings.warn(
+Loading STT model...
+Models loaded. Starting server... (TTS served by chatterbox_server.py)
+Voice agent listening on ws://0.0.0.0:8765
+Client connected: ('127.0.0.1', 45920)
+Client connected: ('127.0.0.1', 42430)
+  Audio: 0.96s, peak amplitude 0.2359
+STT (0.41s): Hey.
+  TTS: Hey there! How's it going?...
+  TTS took 0.83s (26 chars)
+Turn done (3.95s total)

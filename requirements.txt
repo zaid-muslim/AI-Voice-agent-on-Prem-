@@ -1,0 +1,6 @@
+faster-whisper>=1.0
+orpheus-speech
+websockets>=12.0
+numpy
+soundfile
+aiohttp>=3.9

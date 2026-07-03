@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""Chatterbox Turbo TTS microservice — runs in its own venv (isolated from the
+main server.py env, which needs a different torch version for vLLM/Orpheus).
+server.py talks to this over HTTP, the same way it talks to Ollama."""
+import io
+
+import soundfile as sf
+import torch
+from chatterbox.tts_turbo import ChatterboxTurboTTS
+from fastapi import FastAPI, Response
+from pydantic import BaseModel
+
+REFERENCE_AUDIO = "reference_male.wav"
+PORT = 8766
+
+app = FastAPI()
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Loading Chatterbox Turbo on {device}...")
+model = ChatterboxTurboTTS.from_pretrained(device=device)
+print("Priming voice conditioning from reference clip...")
+model.prepare_conditionals(REFERENCE_AUDIO, exaggeration=0.85)  # more expressive delivery (default 0.5; >0.9 tends to distort)
+print("Chatterbox Turbo ready.")
+
+
+class SynthesizeRequest(BaseModel):
+    text: str
+
+
+@app.post("/synthesize")
+def synthesize(req: SynthesizeRequest):
+    wav = model.generate(req.text)
+    buf = io.BytesIO()
+    sf.write(buf, wav.squeeze(0).numpy(), model.sr, format="WAV", subtype="PCM_16")
+    return Response(content=buf.getvalue(), media_type="audio/wav")
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
