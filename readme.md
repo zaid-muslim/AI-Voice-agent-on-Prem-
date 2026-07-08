@@ -1,6 +1,18 @@
 # Voice Agent Pipeline
 
 Local, real-time voice assistant: speech in → transcription → LLM response → cloned-voice speech out.
+Currently configured as a bank branch receptionist — conversational and informational only
+(branches, hours, services, contact info); no account access or transactions yet.
+
+## Domain config
+
+All brand/company-specific data lives in `bank_config.json` — bank name, branches, hours,
+services, and contact info. To retarget the bot at a different bank or company, just edit
+that file (it's re-read on every turn, no restart needed) and update the persona wording in
+`build_system_prompt()` in `server.py` if the domain changes (e.g. from a bank to a clinic).
+The bot greets automatically the moment a call connects (a WebSocket connection opens) —
+before the caller says anything — using the same LLM+TTS pipeline as any other turn, so it
+can be interrupted like any other response.
 
 ## Architecture
 
@@ -31,15 +43,16 @@ processes in separate Python environments.
   TTS) and starts processing your new utterance. No button press needed.
 - **Conversation memory** — history persists per browser session (last ~10 exchanges) via
   Ollama's `/api/chat`.
-- **Long-term memory** — durable facts about the user (name, work, preferences, projects)
-  survive across sessions. The LLM has a `remember` tool it calls when you share something
-  worth keeping or say "remember that…"; facts are stored in `memory.json` and injected into
-  the system prompt every turn. Delete `memory.json` to wipe it.
-- **Web search** — the LLM has a `web_search` tool backed by a local
-  [SearXNG](https://github.com/searxng/searxng) instance (`http://localhost:1234`). It's
-  instructed to search only when it doesn't already know the answer (news, weather, prices,
-  recent events) — not for general knowledge — and to say a short line out loud ("let me
-  check that") before searching, so there's no silent gap while it waits on results.
+- **Long-term memory** — durable facts about the caller (name, or anything explicitly asked
+  to be remembered) survive across sessions via a `remember` tool, stored in `memory.json`
+  and injected into the system prompt every turn. Delete `memory.json` to wipe it.
+- **Web search** — scoped strictly to bank/finance-relevant lookups (e.g. exchange rates)
+  backed by a local [SearXNG](https://github.com/searxng/searxng) instance
+  (`http://localhost:1234`). Anything unrelated to banking gets redirected, not searched.
+- **Scope guarding** — the bot stays in character as the bank's receptionist: it won't
+  fabricate a branch, phone number, or policy that isn't in `bank_config.json`, won't attempt
+  account lookups or transactions (points callers to the app, a branch, or customer care
+  instead), and redirects off-topic questions back to banking.
 - **File upload fallback** — the 📁 button lets you upload an audio file directly
   (any format ffmpeg can decode) instead of using the mic.
 

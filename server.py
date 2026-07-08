@@ -51,6 +51,58 @@ def save_memory(fact: str) -> bool:
     print(f"  Remembered: {fact}")
     return True
 
+# ── Domain config (swap this file to retarget the bot at a different brand/company) ──
+DOMAIN_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bank_config.json")
+
+def load_domain_config() -> dict:
+    """Read fresh on every prompt build (like memory) so editing the JSON takes effect
+    on the next turn — no restart needed to retarget the bot at a different bank/brand."""
+    try:
+        with open(DOMAIN_CONFIG_FILE, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, ValueError) as e:
+        print(f"  Warning: couldn't load {DOMAIN_CONFIG_FILE}: {e}")
+        return {}
+
+def format_domain_block(cfg: dict) -> str:
+    if not cfg:
+        return ""
+    lines = [f"You are the virtual receptionist for {cfg.get('bank_name', 'the bank')}."]
+    if cfg.get("tagline"):
+        lines.append(cfg["tagline"] + ".")
+
+    hours = cfg.get("general_hours") or {}
+    if hours:
+        lines.append(
+            "Banking hours: Monday to Thursday " + hours.get("monday_to_thursday", "n/a") +
+            "; Friday " + hours.get("friday", "n/a") +
+            "; Saturday " + hours.get("saturday", "n/a") +
+            "; Sunday: " + hours.get("sunday", "n/a") + "."
+        )
+        if hours.get("note"):
+            lines.append(hours["note"])
+
+    branches = cfg.get("branches") or []
+    if branches:
+        lines.append("Branches you know about:")
+        for b in branches:
+            phone = f", phone {b['phone']}" if b.get("phone") else ""
+            lines.append(f"- {b['name']}: {b['address']}{phone}")
+
+    services = cfg.get("services") or []
+    if services:
+        lines.append("Services offered:")
+        for s in services:
+            lines.append(f"- {s['name']}: {s['description']}")
+
+    if cfg.get("customer_care_number"):
+        lines.append(f"Customer care helpline: {cfg['customer_care_number']}.")
+    if cfg.get("website"):
+        lines.append(f"Website: {cfg['website']}.")
+
+    return "\n".join(lines) + "\n"
+
+
 # ── Real-time VAD (continuous mic streaming) ───────────────────────────────────
 VAD_SAMPLE_RATE      = 16000
 VAD_FRAME_MS         = 20
@@ -76,10 +128,10 @@ WEB_SEARCH_TOOL = {
     "function": {
         "name": "web_search",
         "description": (
-            "Search the web for current, real-time, or otherwise unknown information — news, "
-            "prices, weather, recent events, sports scores, or specific facts you're not confident "
-            "about. Do NOT use this for general knowledge, definitions, math, or anything you "
-            "already know well — searching every time is slow and unnecessary."
+            "Search the web, but ONLY for genuinely bank/finance-relevant information that isn't "
+            "already in your bank data — e.g. a current currency exchange rate. Do NOT use this for "
+            "anything unrelated to banking (weather, news, sports, general trivia, other companies) — "
+            "for those, redirect the caller back to banking topics instead of searching."
         ),
         "parameters": {
             "type": "object",
@@ -96,17 +148,16 @@ REMEMBER_TOOL = {
     "function": {
         "name": "remember",
         "description": (
-            "Save a durable fact about the user to long-term memory so you'll still know it in "
-            "future conversations — their name, where they work or live, preferences, ongoing "
-            "projects, relationships, or anything they explicitly ask you to remember. Do NOT use "
-            "it for trivia, one-off task details, or things already in your memory. Keep the fact "
-            "short and self-contained, e.g. 'The user's name is Nauyan' or 'The user prefers short "
-            "answers'."
+            "Save a short fact about this caller to long-term memory so you'll know it next time "
+            "they call — their name, or anything they explicitly ask you to remember. Do NOT use it "
+            "to collect unrelated personal details (job, address, relationships), trivia, or "
+            "one-off task details. Keep the fact short and self-contained, e.g. 'The caller's name "
+            "is Ahmed'."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "fact": {"type": "string", "description": "The fact to remember, phrased about the user"},
+                "fact": {"type": "string", "description": "The fact to remember, phrased about the caller"},
             },
             "required": ["fact"],
         },
@@ -118,60 +169,57 @@ TOOLS = [WEB_SEARCH_TOOL, REMEMBER_TOOL]
 
 def build_system_prompt() -> str:
     """Rebuilt on every call so the model always has the real current date/time (it has no innate
-    awareness of "now") and the latest long-term memory injected."""
+    awareness of "now"), the latest long-term memory, and the latest domain config injected."""
     now = datetime.now().astimezone()
     now_str = now.strftime("%A, %B %d, %Y, %I:%M %p %Z")
+
+    domain_block = format_domain_block(load_domain_config())
 
     memories = load_memories()
     if memories:
         memory_block = (
-            "Here's what you remember about the user from past conversations — use it naturally, "
+            "Here's what you remember about this caller from past conversations — use it naturally, "
             "don't recite it back:\n" + "\n".join(f"- {m}" for m in memories) + "\n"
         )
     else:
-        memory_block = "You don't have any long-term memories about the user yet.\n"
+        memory_block = ""
 
     return (
+        domain_block +
         memory_block +
         f"Right now it is {now_str}. Always use this as the true current date/time — never state "
         "a date or year from your training data as if it were current, and never say things like "
-        "'as of 2023' or guess what year it is. For anything date- or time-sensitive (someone's "
-        "age, how long ago something happened, whether something has already occurred), calculate "
-        "it from the real date above. "
-        "You are a voice assistant having a real spoken conversation — you're a person talking, not a "
-        "document being read aloud. "
-        "Talk like a friend would: contractions always (it's, you're, that'll), casual interjections "
-        "(oh nice, hmm, honestly, look, yeah so), and real reactions to what the person said before "
-        "diving into an answer. "
-        "Be frank and direct — have opinions, take a side when asked, admit when something's debatable "
-        "or when you don't know. Don't hedge everything. "
-        "Vary your rhythm: short punchy lines mixed with longer flowing ones. Never sound like an "
-        "encyclopedia, a customer-service script, or a list read out loud. "
-        "Keep answers short — usually one to three sentences, like a real spoken reply, never a "
-        "paragraph or a lecture. Give the key point first; if there's more, stop and offer to go "
-        "deeper rather than dumping it all at once. "
+        "'as of 2023' or guess what year it is. Use it to answer things like whether a branch is "
+        "open right now, given the hours above. "
+        "You're speaking with a caller over the phone, not writing a document — talk like a real "
+        "receptionist: warm, polite, and professional, but natural — contractions are fine (it's, "
+        "you're, that'll), and it's fine to acknowledge what they said before answering. "
+        "Keep answers short — usually one to two sentences, like a real phone call, never a "
+        "paragraph or a lecture. Give the key fact first (the address, the hours, the answer), and "
+        "only add more if they ask. "
         "No markdown, bullets, numbered lists, or code blocks — only plain speakable sentences, since "
-        "everything you write is converted directly to speech. "
-        "The speech synthesizer only reads Latin/Roman script — if the person is speaking Urdu, Hindi, "
-        "Arabic, or any other language, always reply using Roman transliteration (e.g. Roman Urdu) in "
-        "the Latin alphabet, never in native script (no Urdu, Devanagari, Arabic, etc. script), or the "
-        "synthesizer will fail. "
-        "You have a web_search tool. Only reach for it when you genuinely don't know something or the "
-        "answer could be outdated (news, weather, prices, recent events, scores, anything after your "
-        "training data) — never for things you already know. "
-        "If you do need to search: say ONE short natural line first, like 'good question, let me "
-        "check' or 'hmm, let me look that up' — exactly once, never restate or rephrase it a second "
-        "time, then immediately call the tool. "
-        "Once you receive search results in a later message, do not say anything about searching or "
-        "checking again — just answer directly using that information, summarized conversationally "
-        "in your own words, never reading out titles, URLs, or a list. "
-        "You also have a remember tool for long-term memory. You MUST call remember in the same turn "
-        "whenever the user tells you a durable fact about themselves — their name, job, employer, "
-        "location, preferences, ongoing projects, or relationships — and whenever they explicitly say "
-        "to remember something. This is not optional: if they say 'my name is X' or 'I work at Y' or "
-        "'remember that ...', call remember with that fact AND reply normally in the same turn. Save "
-        "one short fact per call. Don't announce that you're saving it, and don't save trivia, "
-        "one-off task details, or things already in your memory above. "
+        "everything you write is converted directly to speech. If listing more than one branch or "
+        "service, say them as a natural spoken sentence, not a list. "
+        "The speech synthesizer only reads Latin/Roman script — if the caller is speaking Urdu, Hindi, "
+        "or any other language, always reply using Roman transliteration (e.g. Roman Urdu) in the "
+        "Latin alphabet, never in native script, or the synthesizer will fail. "
+        "Stay strictly in character and in scope: you only handle questions about this bank — "
+        "branches, hours, contact info, and the general services listed above. You are informational "
+        "only right now — you cannot check anyone's account, balance, or card, make transactions, "
+        "or take any action on an account; if asked, politely explain that and point them to a "
+        "branch visit, the mobile app, or the customer care number above. If asked something "
+        "completely unrelated to banking (weather, news, sports, trivia, other topics), do NOT try to "
+        "help or search for it — redirect immediately: say you're the bank's assistant and ask what "
+        "banking question you can help with. Never make up a branch, phone number, rate, or policy "
+        "that isn't listed above — if you don't know, say so and offer the customer care number instead. "
+        "You have a web_search tool for genuinely bank-relevant information not listed above (e.g. "
+        "current exchange rates) — never for unrelated topics, and never in place of the branch/hours/"
+        "service info you already have. If you do search, say ONE short natural line first, like "
+        "'let me check that for you', exactly once, then call the tool. Once results come back, "
+        "answer directly from them in your own words, never reading out titles or URLs. "
+        "You also have a remember tool for long-term memory. Call it whenever the caller shares a "
+        "durable fact worth keeping for next time — their name, or something they explicitly ask you "
+        "to remember. Don't announce that you're saving it, and don't save trivia or one-off details. "
         "Never write bracketed stage directions or tags like [laugh], [sigh], or [pause] — write "
         "only plain words meant to be spoken aloud."
     )
@@ -402,15 +450,9 @@ async def process_uploaded_audio(ws, audio_bytes: bytes, history: list):
     await respond_to_transcript(ws, transcript, history, t0)
 
 
-async def respond_to_transcript(ws, transcript: str, history: list, t0: float):
-    """LLM (+ optional web search) + TTS for one user turn, shared by both entry points."""
-    # Record the user's turn right away, so it's remembered even if this turn gets interrupted.
-    history.append({"role": "user", "content": transcript})
-    # Assistant/tool turns are staged here and only committed to `history` once each step
-    # actually finishes — so an interruption preserves exactly what really happened, no more.
-    turns_to_commit = []
-
-    # 2. LLM + 3. TTS (pipelined: synthesis overlaps with LLM streaming and playback)
+async def speak_and_return(ws, messages: list, tools: list | None) -> tuple[str, list | None]:
+    """Run one LLM pass with TTS playback pipelined to it. Returns (full_text, tool_calls).
+    Shared by respond_to_transcript (real user turns) and greet_caller (opening greeting)."""
     sentence_q = asyncio.Queue()
 
     async def tts_worker():
@@ -428,9 +470,47 @@ async def respond_to_transcript(ws, transcript: str, history: list, t0: float):
 
     worker = asyncio.create_task(tts_worker())
     try:
-        reply, tool_calls = await speak_stream(
-            ws, sentence_q, stream_llm(history, tools=TOOLS)
-        )
+        reply, tool_calls = await speak_stream(ws, sentence_q, stream_llm(messages, tools=tools))
+        await sentence_q.put(None)
+        await worker
+        return reply, tool_calls
+    finally:
+        if not worker.done():
+            worker.cancel()
+            try:
+                await worker
+            except (asyncio.CancelledError, Exception):
+                pass
+
+
+async def greet_caller(ws, history: list):
+    """Speak a welcome message the instant a call connects. The trigger isn't a real user
+    message, so it's never committed to history — only the assistant's reply is — meaning
+    history reads naturally starting from the caller's first real turn."""
+    trigger = [{"role": "user", "content": "[The call has just connected. Greet the caller now.]"}]
+    try:
+        reply, _ = await speak_and_return(ws, trigger, None)
+        if reply.strip():
+            history.append({"role": "assistant", "content": reply})
+        await ws.send(json.dumps({"type": "done"}))
+    except asyncio.CancelledError:
+        print("  Greeting interrupted")
+        raise
+    except Exception as e:
+        print(f"  Greeting error: {e}")
+
+
+async def respond_to_transcript(ws, transcript: str, history: list, t0: float):
+    """LLM (+ optional web search / remember) + TTS for one user turn, shared by both
+    audio entry points."""
+    # Record the user's turn right away, so it's remembered even if this turn gets interrupted.
+    history.append({"role": "user", "content": transcript})
+    # Assistant/tool turns are staged here and only committed to `history` once each step
+    # actually finishes — so an interruption preserves exactly what really happened, no more.
+    turns_to_commit = []
+
+    try:
+        reply, tool_calls = await speak_and_return(ws, history, TOOLS)
 
         if tool_calls:
             turns_to_commit.append(
@@ -456,16 +536,11 @@ async def respond_to_transcript(ws, transcript: str, history: list, t0: float):
 
             # Follow-up pass, no tools this time — forces a final spoken answer grounded in the
             # tool results instead of calling tools again.
-            follow_reply, _ = await speak_stream(
-                ws, sentence_q, stream_llm(history + turns_to_commit, tools=None)
-            )
+            follow_reply, _ = await speak_and_return(ws, history + turns_to_commit, None)
             if follow_reply.strip():
                 turns_to_commit.append({"role": "assistant", "content": follow_reply})
         elif reply.strip():
             turns_to_commit.append({"role": "assistant", "content": reply})
-
-        await sentence_q.put(None)
-        await worker
     except asyncio.CancelledError:
         print(f"  Turn interrupted ({time.time()-t0:.2f}s in)")
         raise
@@ -474,12 +549,6 @@ async def respond_to_transcript(ws, transcript: str, history: list, t0: float):
         await ws.send(json.dumps({"type": "error", "message": f"LLM/TTS error: {e}"}))
         return
     finally:
-        if not worker.done():
-            worker.cancel()
-            try:
-                await worker
-            except (asyncio.CancelledError, Exception):
-                pass
         history.extend(turns_to_commit)
         del history[:-MAX_HISTORY_MESSAGES]
 
@@ -591,6 +660,11 @@ async def handle_client(ws):
                         continue
                 if len(state["utterance"]) >= MAX_UTTERANCE_FRAMES * VAD_FRAME_BYTES:
                     await finalize_utterance()
+
+    # Call connected: greet the caller immediately, before waiting for them to speak.
+    # This runs through the same task/barge-in machinery as any other turn, so talking
+    # over the greeting interrupts it exactly like interrupting any other response.
+    state["current_task"] = asyncio.create_task(greet_caller(ws, history))
 
     try:
         async for message in ws:

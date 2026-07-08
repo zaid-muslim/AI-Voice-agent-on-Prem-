@@ -8,7 +8,7 @@ from chatterbox.tts_turbo import ChatterboxTurboTTS
 from fastapi import FastAPI, Response
 from pydantic import BaseModel
 
-REFERENCE_AUDIO = "reference_female.wav"
+REFERENCE_AUDIO = "reference_trump.wav"
 PORT = 8766
 
 app = FastAPI()
