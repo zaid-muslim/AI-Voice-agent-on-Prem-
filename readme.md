@@ -31,6 +31,10 @@ processes in separate Python environments.
   TTS) and starts processing your new utterance. No button press needed.
 - **Conversation memory** — history persists per browser session (last ~10 exchanges) via
   Ollama's `/api/chat`.
+- **Long-term memory** — durable facts about the user (name, work, preferences, projects)
+  survive across sessions. The LLM has a `remember` tool it calls when you share something
+  worth keeping or say "remember that…"; facts are stored in `memory.json` and injected into
+  the system prompt every turn. Delete `memory.json` to wipe it.
 - **Web search** — the LLM has a `web_search` tool backed by a local
   [SearXNG](https://github.com/searxng/searxng) instance (`http://localhost:1234`). It's
   instructed to search only when it doesn't already know the answer (news, weather, prices,

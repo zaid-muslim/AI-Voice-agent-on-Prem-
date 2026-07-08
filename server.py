@@ -4,7 +4,7 @@ Voice agent WebSocket server.
 Run: python3 server.py
 """
 
-import asyncio, base64, json, re, subprocess, time
+import asyncio, base64, json, os, re, subprocess, time
 from datetime import datetime
 import numpy as np
 import webrtcvad
@@ -20,6 +20,36 @@ SEARXNG_URL    = "http://localhost:1234/search"       # SearXNG container: host 
 WEB_SEARCH_RESULT_COUNT = 4
 MIN_TTS_CHARS  = 25   # sentences shorter than this ("Sure!") merge into the next one
 WS_PORT        = 8765
+
+# ── Long-term memory (persists across sessions, unlike per-connection chat history) ──
+MEMORY_FILE      = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memory.json")
+MAX_MEMORIES     = 60   # cap injected facts to bound prompt size
+
+def load_memories() -> list[str]:
+    try:
+        with open(MEMORY_FILE, "r") as f:
+            data = json.load(f)
+        return [str(x) for x in data][-MAX_MEMORIES:]
+    except (FileNotFoundError, json.JSONDecodeError, ValueError):
+        return []
+
+def save_memory(fact: str) -> bool:
+    """Append a durable fact to disk, skipping near-duplicates. Returns True if stored."""
+    fact = fact.strip()
+    if not fact:
+        return False
+    existing = load_memories()
+    if any(fact.lower() == e.lower() for e in existing):
+        return False
+    existing.append(fact)
+    try:
+        with open(MEMORY_FILE, "w") as f:
+            json.dump(existing[-MAX_MEMORIES:], f, indent=2)
+    except OSError as e:
+        print(f"  Failed to save memory: {e}")
+        return False
+    print(f"  Remembered: {fact}")
+    return True
 
 # ── Real-time VAD (continuous mic streaming) ───────────────────────────────────
 VAD_SAMPLE_RATE      = 16000
@@ -61,12 +91,48 @@ WEB_SEARCH_TOOL = {
     },
 }
 
+REMEMBER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "remember",
+        "description": (
+            "Save a durable fact about the user to long-term memory so you'll still know it in "
+            "future conversations — their name, where they work or live, preferences, ongoing "
+            "projects, relationships, or anything they explicitly ask you to remember. Do NOT use "
+            "it for trivia, one-off task details, or things already in your memory. Keep the fact "
+            "short and self-contained, e.g. 'The user's name is Nauyan' or 'The user prefers short "
+            "answers'."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "fact": {"type": "string", "description": "The fact to remember, phrased about the user"},
+            },
+            "required": ["fact"],
+        },
+    },
+}
+
+TOOLS = [WEB_SEARCH_TOOL, REMEMBER_TOOL]
+
+
 def build_system_prompt() -> str:
-    """Rebuilt on every call so the model always has the real current date/time — it has
-    no innate awareness of "now" and will otherwise guess from stale training data."""
+    """Rebuilt on every call so the model always has the real current date/time (it has no innate
+    awareness of "now") and the latest long-term memory injected."""
     now = datetime.now().astimezone()
     now_str = now.strftime("%A, %B %d, %Y, %I:%M %p %Z")
+
+    memories = load_memories()
+    if memories:
+        memory_block = (
+            "Here's what you remember about the user from past conversations — use it naturally, "
+            "don't recite it back:\n" + "\n".join(f"- {m}" for m in memories) + "\n"
+        )
+    else:
+        memory_block = "You don't have any long-term memories about the user yet.\n"
+
     return (
+        memory_block +
         f"Right now it is {now_str}. Always use this as the true current date/time — never state "
         "a date or year from your training data as if it were current, and never say things like "
         "'as of 2023' or guess what year it is. For anything date- or time-sensitive (someone's "
@@ -99,7 +165,15 @@ def build_system_prompt() -> str:
         "Once you receive search results in a later message, do not say anything about searching or "
         "checking again — just answer directly using that information, summarized conversationally "
         "in your own words, never reading out titles, URLs, or a list. "
-        
+        "You also have a remember tool for long-term memory. You MUST call remember in the same turn "
+        "whenever the user tells you a durable fact about themselves — their name, job, employer, "
+        "location, preferences, ongoing projects, or relationships — and whenever they explicitly say "
+        "to remember something. This is not optional: if they say 'my name is X' or 'I work at Y' or "
+        "'remember that ...', call remember with that fact AND reply normally in the same turn. Save "
+        "one short fact per call. Don't announce that you're saving it, and don't save trivia, "
+        "one-off task details, or things already in your memory above. "
+        "Never write bracketed stage directions or tags like [laugh], [sigh], or [pause] — write "
+        "only plain words meant to be spoken aloud."
     )
 
 stt_model = None
@@ -355,27 +429,33 @@ async def respond_to_transcript(ws, transcript: str, history: list, t0: float):
     worker = asyncio.create_task(tts_worker())
     try:
         reply, tool_calls = await speak_stream(
-            ws, sentence_q, stream_llm(history, tools=[WEB_SEARCH_TOOL])
+            ws, sentence_q, stream_llm(history, tools=TOOLS)
         )
 
         if tool_calls:
-            call = tool_calls[0]
             turns_to_commit.append(
                 {"role": "assistant", "content": reply, "tool_calls": tool_calls}
             )
-            fn = call.get("function", {})
-            if fn.get("name") == "web_search":
-                query = (fn.get("arguments") or {}).get("query", "").strip()
-                print(f"  Web search: {query}")
-                results_text = await web_search(query) if query else "No search query was given."
-            else:
-                results_text = f"Unsupported tool: {fn.get('name')}"
-            turns_to_commit.append(
-                {"role": "tool", "content": results_text, "tool_call_id": call.get("id", "")}
-            )
+            # Execute every tool the model asked for, appending each result.
+            for call in tool_calls:
+                fn = call.get("function", {})
+                name = fn.get("name")
+                args = fn.get("arguments") or {}
+                if name == "web_search":
+                    query = args.get("query", "").strip()
+                    print(f"  Web search: {query}")
+                    result = await web_search(query) if query else "No search query was given."
+                elif name == "remember":
+                    fact = args.get("fact", "").strip()
+                    result = "Saved to memory." if save_memory(fact) else "Already knew that."
+                else:
+                    result = f"Unsupported tool: {name}"
+                turns_to_commit.append(
+                    {"role": "tool", "content": result, "tool_call_id": call.get("id", "")}
+                )
 
-            # Follow-up pass, no tools this time — forces a final natural-language answer
-            # grounded in the search results instead of calling the tool again.
+            # Follow-up pass, no tools this time — forces a final spoken answer grounded in the
+            # tool results instead of calling tools again.
             follow_reply, _ = await speak_stream(
                 ws, sentence_q, stream_llm(history + turns_to_commit, tools=None)
             )
