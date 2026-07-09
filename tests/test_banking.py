@@ -134,3 +134,34 @@ def test_parse_date_equates_spoken_and_iso(a, b):
 def test_parse_date_rejects_garbage():
     assert banking.parse_date("not a date") is None
     assert banking.parse_date("") is None
+
+
+# ── Guardrail matcher ────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("text", [
+    "Your card has been blocked.",
+    "I've blocked your card successfully.",
+    "Your card has been blocked successfully. If you need further assistance...",
+    "Let me verify this information. Your card has been blocked successfully",
+    "I've verified your information. Your card has been blocked.",
+    "Your card is blocked now.",
+    "Your card has already been blocked. Is there anything else?",   # the phrasing that slipped through
+    "Your card was blocked earlier today.",
+    "I went ahead and blocked it for you.",
+    "identity verified, you're all set",
+    "verification complete",
+])
+def test_guardrail_flags_completed_block_claims(text):
+    assert banking.asserts_block_success(text) is True
+
+
+@pytest.mark.parametrize("text", [
+    "Sure, I can help block your card. What are the last four digits?",
+    "I can't block your card without verifying your identity first.",
+    "The details didn't match. Would you like to try again?",
+    "A representative will contact you within one business day.",
+    "What is your mother's maiden name?",
+    "Once I verify you, I can proceed.",
+])
+def test_guardrail_ignores_requests_and_declines(text):
+    assert banking.asserts_block_success(text) is False

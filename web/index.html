@@ -206,6 +206,12 @@ function connect() {
       currentAgentBubble = null;
       setStatus(listening ? "Listening…" : "Ready");
     }
+    if (msg.type === "guardrail") {
+      // Server suppressed an unverified block/verification claim it had begun streaming for
+      // display — clear the current bubble so the fabricated text doesn't linger; the truthful
+      // replacement line arrives right after as normal tokens.
+      if (currentAgentBubble) currentAgentBubble.querySelector(".text").textContent = "";
+    }
   };
 }
 connect();

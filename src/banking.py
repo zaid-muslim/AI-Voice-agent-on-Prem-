@@ -16,6 +16,31 @@ import db
 MAX_CARD_ATTEMPTS = 2
 
 
+# ── Output guardrail ────────────────────────────────────────────────────────────
+# Detects a spoken claim that a card was blocked or an identity verified. The server uses this as
+# a hard backstop: the model is never allowed to voice such a claim (a real block confirmation is
+# spoken deterministically by the server from the tool result instead). Deliberately liberal — the
+# past-participle "blocked" almost always signals a completed-action claim ("has been blocked",
+# "has already been blocked", "was blocked", "I blocked it"), whereas requests/promises use the base
+# form "block" ("block your card", "I can block it", "to block your card"), which is NOT matched.
+# Over-matching here only replaces model chatter with a truthful server line; under-matching would
+# let a fabricated confirmation reach the caller, so we bias toward catching more.
+BLOCK_SUCCESS_CLAIM = re.compile(
+    r"\bblocked\b"
+    r"|\b(?:i|we)['’]ve\s+verified\b"
+    r"|\bverified\s+your\s+(?:identity|information|details|account)\b"
+    r"|\bidentity\s+(?:is\s+|has\s+been\s+|was\s+)?(?:verified|confirmed)\b"
+    r"|\b(?:you['’]re|you\s+are)\s+(?:now\s+)?verified\b"
+    r"|\bverification\s+(?:is\s+|was\s+)?(?:complete|completed|successful)\b",
+    re.IGNORECASE,
+)
+
+
+def asserts_block_success(text: str) -> bool:
+    """True if the text claims a card was blocked / identity verified (a completed action)."""
+    return bool(BLOCK_SUCCESS_CLAIM.search(text))
+
+
 def normalize(s: str) -> str:
     """Lowercase, trim, and collapse internal whitespace — absorbs STT casing/spacing noise
     without doing any fuzzy/approximate matching on the identity value itself."""

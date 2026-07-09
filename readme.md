@@ -78,6 +78,10 @@ run.sh     Launches the whole pipeline
   prompt-injection can extract the stored answers, and unknown cards are reported identically to
   wrong answers (no card enumeration). Two failed attempts per call auto-queues a human handoff.
   Every attempt is written to an `audit_log` table. Customer data lives in `data/bank.db` (SQLite).
+  A server-side **guardrail** is the last line of defence: the agent is physically prevented from
+  voicing (or recording) a "card blocked / identity verified" confirmation unless `block_card`
+  actually returned `blocked` this turn — any hallucinated confirmation is suppressed from the
+  audio and replaced with a truthful, server-authored line.
 - **Human handoff (callback ticket)** — there's no telephony/transfer layer yet, so instead of
   giving out the bank's number (which loops back to this very agent), a request for a human calls
   `request_human_handoff`, which queues a ticket in `data/bank.db` and promises a callback within

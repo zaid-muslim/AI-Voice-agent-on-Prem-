@@ -280,17 +280,23 @@ def build_system_prompt() -> str:
         "You also have a remember tool for long-term memory. Call it whenever the caller shares a "
         "durable fact worth keeping for next time — their name, or something they explicitly ask you "
         "to remember. Don't announce that you're saving it, and don't save trivia or one-off details. "
-        "If a caller wants to block a lost or stolen card, you must collect three verification details "
-        "from them, ONE question at a time in natural conversation, in this order: first the last four "
+        "If a caller wants to block a lost or stolen card, collect three verification details from "
+        "them, ONE question at a time in natural conversation, in this order: first the last four "
         "digits of the card, then their mother's maiden name on file, then their date of birth. Ask "
         "for the next detail only after they've answered the previous one. Never skip a question, "
-        "never say whether an answer was right or wrong, and never hint at the correct value. Once you "
-        "have all three, call the block_card tool with exactly what they said — do not decide yourself "
-        "whether it's valid; the system checks it. If the result is blocked, warmly confirm their card "
-        "has been blocked. If it is declined, tell them the details didn't match and offer to try once "
-        "more, without saying which detail was wrong. If it is handed_off, tell them you couldn't "
-        "verify their identity and that a representative will contact them within one business day, and "
-        "do not give any phone number. "
+        "never say whether an answer was right or wrong, and never hint at the correct value. "
+        "This rule is critical: you cannot block a card or verify anyone by talking. Writing a "
+        "sentence like 'your card is blocked' or 'your identity is verified' does nothing and is a "
+        "serious error — the block_card tool is the ONLY thing that can block a card or check "
+        "identity. The moment you have all three details, your only allowed action is to call "
+        "block_card with exactly what the caller said, and you must NOT write any reply in that same "
+        "turn — no confirmation, no summary, nothing but the tool call. Do not judge the answers "
+        "yourself; the system checks them. Only after the tool returns a result may you speak, saying "
+        "exactly what it was: if blocked, warmly confirm the card is blocked; if declined, tell them "
+        "the details didn't match and offer to try once more, without saying which detail was wrong; "
+        "if handed_off, tell them you couldn't verify their identity and a representative will contact "
+        "them within one business day, giving no phone number. Never state or imply a card is blocked "
+        "or an identity verified unless block_card returned blocked in this very turn. "
         "You cannot transfer a call to a live person right now, and you must NEVER give out the bank's "
         "phone number as a way to reach a representative — that number connects back to you. If a "
         "caller asks to speak to a human, a person, or a representative, call the request_human_handoff "
@@ -417,6 +423,38 @@ async def synthesize_to_wav_b64(text: str) -> str:
     return base64.b64encode(wav_bytes).decode()
 
 
+# ── Guardrail: never voice an unverified block / identity-verification ──────────
+# Defense-in-depth behind the system prompt. A claim that a card was blocked or an identity
+# verified is only ever truthful if the block_card tool returned "blocked" this turn. Any such
+# sentence produced otherwise (a hallucinated confirmation) is suppressed — never synthesized to
+# audio, never committed to history — and replaced with a truthful, server-authored line. The
+# detector (banking.asserts_block_success) targets completed-action claims ("has been blocked",
+# "I've blocked", "identity verified"), not requests or promises ("block your card", "once I verify").
+
+# Deterministic, guaranteed-truthful lines, spoken in place of a suppressed claim.
+CARD_OUTCOME_LINES = {
+    "blocked":    "Your card has been blocked. Is there anything else I can help you with?",
+    "declined":   "I'm sorry, those details didn't match our records. Would you like to try once more?",
+    "handed_off": "I couldn't verify your identity, so I've arranged for one of our representatives to "
+                  "call you back within one business day.",
+}
+UNVERIFIED_BLOCK_FALLBACK = (
+    "I'm sorry, I can't confirm that yet. To block your card I first need to verify your identity — "
+    "could you tell me the last four digits of the card?"
+)
+NEUTRAL_FALLBACK = "I'm sorry, I can't confirm that."
+
+
+async def say(ws, text: str) -> str:
+    """Speak a fixed, server-authored line (bypassing the LLM entirely): display it and TTS it.
+    Used to voice a guaranteed-truthful outcome when the guardrail suppresses a model claim."""
+    await ws.send(json.dumps({"type": "token", "text": text}))
+    wav_b64 = await synthesize_to_wav_b64(text)
+    if wav_b64:
+        await ws.send(json.dumps({"type": "audio", "data": wav_b64}))
+    return text
+
+
 # ── Sentence Splitter ─────────────────────────────────────────────────────────
 SENTENCE_END = re.compile(r'(?<=[.!?])\s+')
 # For the very first chunk of a reply, break at the earliest clause boundary too
@@ -438,15 +476,32 @@ def split_sentences(buffer: str) -> tuple[list[str], str]:
     return complete, remainder
 
 
-async def speak_stream(ws, sentence_q: asyncio.Queue, token_iter) -> tuple[str, list | None]:
-    """Consume a stream_llm() event stream: forward text tokens to the client as they
-    arrive and queue completed sentences for TTS. Returns (full_text_spoken, tool_calls),
-    where tool_calls is None if the model didn't call a tool this pass."""
+async def speak_stream(ws, sentence_q: asyncio.Queue, token_iter,
+                       guard: dict | None = None) -> tuple[str, list | None]:
+    """Consume a stream_llm() event stream: forward text tokens to the client as they arrive and
+    queue completed sentences for TTS. Returns (spoken_text, tool_calls) — spoken_text is only what
+    was actually voiced (so it's what goes to history), tool_calls is None if no tool was called.
+
+    The model is never allowed to voice a "card blocked / identity verified" claim: any such sentence
+    is suppressed (not spoken, not returned) and `guard["tripped"]` is set. A genuine block
+    confirmation is spoken deterministically by the server from the tool result, not by the model."""
     buffer = ""
     carry = ""   # short lead-in ("Sure!") waiting to be merged with the next sentence
-    full_text = ""
+    spoken_parts = []
     tool_calls = None
     first_chunk_done = False
+
+    async def emit(sentence: str):
+        sentence = sentence.strip()
+        if not sentence:
+            return
+        if banking.asserts_block_success(sentence):
+            if guard is not None:
+                guard["tripped"] = True
+            print(f"  [guardrail] suppressed unverified block/verify claim: {sentence[:70]!r}")
+            return
+        spoken_parts.append(sentence)
+        await sentence_q.put(sentence)
 
     async for kind, payload in token_iter:
         if kind == "tool_calls":
@@ -456,14 +511,13 @@ async def speak_stream(ws, sentence_q: asyncio.Queue, token_iter) -> tuple[str, 
         token = payload
         await ws.send(json.dumps({"type": "token", "text": token}))
         buffer += token
-        full_text += token
 
         # Fast path: get the first chunk out at the earliest clause boundary that already
         # has enough words, so speech starts quickly; then settle into full-sentence chunks.
         if not first_chunk_done:
             for m in FIRST_CHUNK_END.finditer(buffer):
                 if len(buffer[:m.start()].strip()) >= FIRST_CHUNK_MIN_CHARS:
-                    await sentence_q.put(buffer[:m.start()].strip())
+                    await emit(buffer[:m.start()])
                     buffer = buffer[m.end():]
                     first_chunk_done = True
                     break
@@ -481,14 +535,14 @@ async def speak_stream(ws, sentence_q: asyncio.Queue, token_iter) -> tuple[str, 
             if len(sentence) < MIN_TTS_CHARS:
                 carry = sentence
                 continue
-            await sentence_q.put(sentence)
+            await emit(sentence)
 
     # flush whatever is left (carry + incomplete final sentence)
     tail = (carry + " " + buffer.strip()).strip()
     if tail:
-        await sentence_q.put(tail)
+        await emit(tail)
 
-    return full_text, tool_calls
+    return " ".join(spoken_parts), tool_calls
 
 
 # ── Per-Turn Processing (runs as a cancellable task) ───────────────────────────
@@ -527,9 +581,11 @@ async def process_uploaded_audio(ws, audio_bytes: bytes, history: list, session:
     await respond_to_transcript(ws, transcript, history, session, t0)
 
 
-async def speak_and_return(ws, messages: list, tools: list | None) -> tuple[str, list | None]:
-    """Run one LLM pass with TTS playback pipelined to it. Returns (full_text, tool_calls).
-    Shared by respond_to_transcript (real user turns) and greet_caller (opening greeting)."""
+async def speak_and_return(ws, messages: list, tools: list | None,
+                           guard: dict | None = None) -> tuple[str, list | None]:
+    """Run one LLM pass with TTS playback pipelined to it. Returns (spoken_text, tool_calls).
+    Shared by respond_to_transcript (real user turns) and greet_caller (opening greeting).
+    `guard` is forwarded to the block-claim guardrail in speak_stream."""
     sentence_q = asyncio.Queue()
 
     async def tts_worker():
@@ -547,7 +603,9 @@ async def speak_and_return(ws, messages: list, tools: list | None) -> tuple[str,
 
     worker = asyncio.create_task(tts_worker())
     try:
-        reply, tool_calls = await speak_stream(ws, sentence_q, stream_llm(messages, tools=tools))
+        reply, tool_calls = await speak_stream(
+            ws, sentence_q, stream_llm(messages, tools=tools), guard=guard,
+        )
         await sentence_q.put(None)
         await worker
         return reply, tool_calls
@@ -587,13 +645,17 @@ async def respond_to_transcript(ws, transcript: str, history: list, session: dic
     turns_to_commit = []
 
     try:
-        reply, tool_calls = await speak_and_return(ws, history, TOOLS)
+        # First pass runs with tools. The guardrail (in speak_stream) suppresses any block/verify
+        # claim the model tries to voice — a real confirmation is spoken by the server below.
+        guard1 = {}
+        reply, tool_calls = await speak_and_return(ws, history, TOOLS, guard=guard1)
 
         if tool_calls:
             turns_to_commit.append(
                 {"role": "assistant", "content": reply, "tool_calls": tool_calls}
             )
             # Execute every tool the model asked for, appending each result.
+            block_status = None   # set iff the model called block_card this turn
             for call in tool_calls:
                 fn = call.get("function", {})
                 name = fn.get("name")
@@ -609,7 +671,8 @@ async def respond_to_transcript(ws, transcript: str, history: list, session: dic
                     # All verification/matching happens in Python; only a status code comes back
                     # to the model — never the stored maiden name/DOB (anti prompt-injection).
                     outcome = banking.verify_and_block_card(DB_CONN, session, args)
-                    print(f"  block_card -> {outcome['status']} (attempts={session.get('failed_card_attempts', 0)})")
+                    block_status = outcome["status"]
+                    print(f"  block_card -> {block_status} (attempts={session.get('failed_card_attempts', 0)})")
                     result = json.dumps(outcome)
                 elif name == "request_human_handoff":
                     outcome = banking.queue_handoff(DB_CONN, args)
@@ -621,11 +684,31 @@ async def respond_to_transcript(ws, transcript: str, history: list, session: dic
                     {"role": "tool", "content": result, "tool_call_id": call.get("id", "")}
                 )
 
-            # Follow-up pass, no tools this time — forces a final spoken answer grounded in the
-            # tool results instead of calling tools again.
-            follow_reply, _ = await speak_and_return(ws, history + turns_to_commit, None)
-            if follow_reply.strip():
-                turns_to_commit.append({"role": "assistant", "content": follow_reply})
+            if guard1.get("tripped"):   # drop any block claim the model streamed before the tool ran
+                await ws.send(json.dumps({"type": "guardrail"}))
+
+            if block_status is not None:
+                # The card-block outcome is spoken deterministically from the tool result — the model
+                # never phrases (and so can never fabricate or misreport) a block. This is the hard
+                # guarantee: what the caller hears about their card is exactly what the DB did.
+                spoken = await say(ws, CARD_OUTCOME_LINES.get(block_status, NEUTRAL_FALLBACK))
+                turns_to_commit.append({"role": "assistant", "content": spoken})
+            else:
+                # Non-block tools (web_search / remember / handoff): let the model phrase a natural
+                # follow-up grounded in the results, with the guardrail still active as a backstop.
+                guard2 = {}
+                follow_reply, _ = await speak_and_return(ws, history + turns_to_commit, None, guard=guard2)
+                if guard2.get("tripped"):
+                    await ws.send(json.dumps({"type": "guardrail"}))
+                    follow_reply = await say(ws, NEUTRAL_FALLBACK)
+                if follow_reply.strip():
+                    turns_to_commit.append({"role": "assistant", "content": follow_reply})
+        elif guard1.get("tripped"):
+            # No tool was called, yet the model tried to claim a block/verification — pure
+            # fabrication (the exact bug we hit live). Suppress it and speak a truthful correction.
+            await ws.send(json.dumps({"type": "guardrail"}))
+            safe = await say(ws, UNVERIFIED_BLOCK_FALLBACK)
+            turns_to_commit.append({"role": "assistant", "content": safe})
         elif reply.strip():
             turns_to_commit.append({"role": "assistant", "content": reply})
     except asyncio.CancelledError:
