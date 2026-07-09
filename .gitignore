@@ -9,8 +9,11 @@ __pycache__/
 logs/
 *.log
 
-# Runtime state (long-term memory is per-deployment caller data)
+# Runtime state (per-deployment caller data — regenerate the DB with src/seed_db.py)
 data/memory.json
+data/bank.db
+data/bank.db-wal
+data/bank.db-shm
 
 # Claude Code local state
 .claude/scheduled_tasks.lock

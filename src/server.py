@@ -11,6 +11,9 @@ import webrtcvad
 import websockets
 from faster_whisper import WhisperModel
 
+import banking
+import db
+
 # ── Config ────────────────────────────────────────────────────────────────────
 OLLAMA_URL     = "http://localhost:11434/api/chat"
 OLLAMA_MODEL   = "qwen2.5:14b"
@@ -24,6 +27,12 @@ WS_PORT        = 8765
 # Anchor data/config paths to the project root (parent of src/) so they resolve
 # no matter what directory the process is launched from.
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# ── Banking data store (SQLite: customer records for verification, audit log, handoff tickets) ──
+# One shared connection for the whole process; see db.py. Run `python3 src/seed_db.py` once to
+# populate test customers.
+DB_CONN = db.connect()
+db.init_schema(DB_CONN)
 
 # ── Long-term memory (persists across sessions, unlike per-connection chat history) ──
 MEMORY_FILE      = os.path.join(PROJECT_ROOT, "data", "memory.json")
@@ -169,7 +178,51 @@ REMEMBER_TOOL = {
     },
 }
 
-TOOLS = [WEB_SEARCH_TOOL, REMEMBER_TOOL]
+BLOCK_CARD_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "block_card",
+        "description": (
+            "Block a customer's lost or stolen card. Only call this once you have collected ALL "
+            "THREE verification details from the customer in conversation: the last 4 digits of "
+            "the card, their mother's maiden name, and their date of birth. Pass exactly what the "
+            "customer said — do not judge whether the answers are correct yourself; the system "
+            "verifies them and blocks the card only if they match."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "card_last4": {"type": "string", "description": "Last 4 digits of the card, as the customer said them"},
+                "mother_maiden_name": {"type": "string", "description": "Mother's maiden name, as the customer said it"},
+                "dob": {"type": "string", "description": "Date of birth, as the customer said it"},
+            },
+            "required": ["card_last4", "mother_maiden_name", "dob"],
+        },
+    },
+}
+
+REQUEST_HUMAN_HANDOFF_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "request_human_handoff",
+        "description": (
+            "Log a callback request from a human representative. Use this when the customer "
+            "explicitly asks to speak to a human, a person, or a representative. Do NOT give out "
+            "the bank's phone number to reach a human — that line connects back to you; call this "
+            "tool instead."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reason": {"type": "string", "description": "Short reason the customer wants a human"},
+                "customer_id": {"type": "string", "description": "Customer id if known, otherwise omit"},
+            },
+            "required": ["reason"],
+        },
+    },
+}
+
+TOOLS = [WEB_SEARCH_TOOL, REMEMBER_TOOL, BLOCK_CARD_TOOL, REQUEST_HUMAN_HANDOFF_TOOL]
 
 
 def build_system_prompt() -> str:
@@ -209,10 +262,12 @@ def build_system_prompt() -> str:
         "or any other language, always reply using Roman transliteration (e.g. Roman Urdu) in the "
         "Latin alphabet, never in native script, or the synthesizer will fail. "
         "Stay strictly in character and in scope: you only handle questions about this bank — "
-        "branches, hours, contact info, and the general services listed above. You are informational "
-        "only right now — you cannot check anyone's account, balance, or card, make transactions, "
-        "or take any action on an account; if asked, politely explain that and point them to a "
-        "branch visit, the mobile app, or the customer care number above. If asked something "
+        "branches, hours, contact info, and the general services listed above. Beyond answering "
+        "questions, the only actions you can take are blocking a lost or stolen card after identity "
+        "verification, and logging a callback request from a human representative — both described "
+        "below. You still cannot check anyone's account, balance, or transactions, move money, or take "
+        "any other action on an account; if asked for those, politely explain you can't and point them "
+        "to a branch visit or the mobile app. If asked something "
         "completely unrelated to banking (weather, news, sports, trivia, other topics), do NOT try to "
         "help or search for it — redirect immediately: say you're the bank's assistant and ask what "
         "banking question you can help with. Never make up a branch, phone number, rate, or policy "
@@ -225,6 +280,23 @@ def build_system_prompt() -> str:
         "You also have a remember tool for long-term memory. Call it whenever the caller shares a "
         "durable fact worth keeping for next time — their name, or something they explicitly ask you "
         "to remember. Don't announce that you're saving it, and don't save trivia or one-off details. "
+        "If a caller wants to block a lost or stolen card, you must collect three verification details "
+        "from them, ONE question at a time in natural conversation, in this order: first the last four "
+        "digits of the card, then their mother's maiden name on file, then their date of birth. Ask "
+        "for the next detail only after they've answered the previous one. Never skip a question, "
+        "never say whether an answer was right or wrong, and never hint at the correct value. Once you "
+        "have all three, call the block_card tool with exactly what they said — do not decide yourself "
+        "whether it's valid; the system checks it. If the result is blocked, warmly confirm their card "
+        "has been blocked. If it is declined, tell them the details didn't match and offer to try once "
+        "more, without saying which detail was wrong. If it is handed_off, tell them you couldn't "
+        "verify their identity and that a representative will contact them within one business day, and "
+        "do not give any phone number. "
+        "You cannot transfer a call to a live person right now, and you must NEVER give out the bank's "
+        "phone number as a way to reach a representative — that number connects back to you. If a "
+        "caller asks to speak to a human, a person, or a representative, call the request_human_handoff "
+        "tool with a short reason, then tell them a representative will contact them within one "
+        "business day. You may still state the customer care number as general information if they ask "
+        "for it, just never as a way to reach a live person right now. "
         "Never write bracketed stage directions or tags like [laugh], [sigh], or [pause] — write "
         "only plain words meant to be spoken aloud."
     )
@@ -420,7 +492,7 @@ async def speak_stream(ws, sentence_q: asyncio.Queue, token_iter) -> tuple[str, 
 
 
 # ── Per-Turn Processing (runs as a cancellable task) ───────────────────────────
-async def process_turn(ws, audio_array: np.ndarray, history: list):
+async def process_turn(ws, audio_array: np.ndarray, history: list, session: dict):
     """Entry point for the real-time VAD-segmented mic stream — audio is already
     decoded 16kHz mono float32 PCM, no STT-format decoding needed."""
     t0 = time.time()
@@ -435,10 +507,10 @@ async def process_turn(ws, audio_array: np.ndarray, history: list):
         return
     await ws.send(json.dumps({"type": "transcript", "text": transcript}))
     print(f"STT ({time.time()-t0:.2f}s): {transcript}")
-    await respond_to_transcript(ws, transcript, history, t0)
+    await respond_to_transcript(ws, transcript, history, session, t0)
 
 
-async def process_uploaded_audio(ws, audio_bytes: bytes, history: list):
+async def process_uploaded_audio(ws, audio_bytes: bytes, history: list, session: dict):
     """Entry point for the file-upload path — arbitrary format, needs ffmpeg decode."""
     t0 = time.time()
     try:
@@ -452,7 +524,7 @@ async def process_uploaded_audio(ws, audio_bytes: bytes, history: list):
         return
     await ws.send(json.dumps({"type": "transcript", "text": transcript}))
     print(f"STT ({time.time()-t0:.2f}s): {transcript}")
-    await respond_to_transcript(ws, transcript, history, t0)
+    await respond_to_transcript(ws, transcript, history, session, t0)
 
 
 async def speak_and_return(ws, messages: list, tools: list | None) -> tuple[str, list | None]:
@@ -505,9 +577,9 @@ async def greet_caller(ws, history: list):
         print(f"  Greeting error: {e}")
 
 
-async def respond_to_transcript(ws, transcript: str, history: list, t0: float):
-    """LLM (+ optional web search / remember) + TTS for one user turn, shared by both
-    audio entry points."""
+async def respond_to_transcript(ws, transcript: str, history: list, session: dict, t0: float):
+    """LLM (+ optional tools) + TTS for one user turn, shared by both audio entry points.
+    `session` carries per-call state (e.g. the card-verification attempt counter)."""
     # Record the user's turn right away, so it's remembered even if this turn gets interrupted.
     history.append({"role": "user", "content": transcript})
     # Assistant/tool turns are staged here and only committed to `history` once each step
@@ -533,6 +605,16 @@ async def respond_to_transcript(ws, transcript: str, history: list, t0: float):
                 elif name == "remember":
                     fact = args.get("fact", "").strip()
                     result = "Saved to memory." if save_memory(fact) else "Already knew that."
+                elif name == "block_card":
+                    # All verification/matching happens in Python; only a status code comes back
+                    # to the model — never the stored maiden name/DOB (anti prompt-injection).
+                    outcome = banking.verify_and_block_card(DB_CONN, session, args)
+                    print(f"  block_card -> {outcome['status']} (attempts={session.get('failed_card_attempts', 0)})")
+                    result = json.dumps(outcome)
+                elif name == "request_human_handoff":
+                    outcome = banking.queue_handoff(DB_CONN, args)
+                    print(f"  request_human_handoff -> ticket {outcome.get('ticket_id')}")
+                    result = json.dumps(outcome)
                 else:
                     result = f"Unsupported tool: {name}"
                 turns_to_commit.append(
@@ -575,6 +657,7 @@ async def cancel_current_turn(current_task):
 async def handle_client(ws):
     print(f"Client connected: {ws.remote_address}")
     history = []   # conversation memory for this connection: [{"role": ..., "content": ...}, ...]
+    session = {"failed_card_attempts": 0}   # per-call state: card-verification attempt counter
     vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
 
     # VAD state — all mutated from the single-threaded frame loop below.
@@ -602,7 +685,7 @@ async def handle_client(ws):
             print(f"[VAD] utterance finalized: {frames * VAD_FRAME_MS / 1000:.2f}s, peak RMS {state['peak_rms']:.0f}")
             audio_array = pcm16_bytes_to_array(bytes(state["utterance"]))
             await cancel_current_turn(state["current_task"])
-            state["current_task"] = asyncio.create_task(process_turn(ws, audio_array, history))
+            state["current_task"] = asyncio.create_task(process_turn(ws, audio_array, history, session))
         else:
             print(f"[VAD] discarded short blip: {frames} frames, peak RMS {state['peak_rms']:.0f}")
         state["utterance"] = bytearray()
@@ -693,7 +776,7 @@ async def handle_client(ws):
                     await cancel_current_turn(state["current_task"])
                     audio_bytes = base64.b64decode(data.get("data", ""))
                     state["current_task"] = asyncio.create_task(
-                        process_uploaded_audio(ws, audio_bytes, history)
+                        process_uploaded_audio(ws, audio_bytes, history, session)
                     )
 
     except websockets.exceptions.ConnectionClosed:

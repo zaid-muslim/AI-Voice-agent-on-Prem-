@@ -3,3 +3,4 @@ websockets>=12.0
 numpy
 aiohttp>=3.9
 webrtcvad
+python-dateutil>=2.8   # tolerant parsing of spoken dates for card-block verification

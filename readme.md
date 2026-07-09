@@ -1,8 +1,10 @@
 # Voice Agent Pipeline
 
 Local, real-time voice assistant: speech in → transcription → LLM response → cloned-voice speech out.
-Currently configured as a bank branch receptionist — conversational and informational only
-(branches, hours, services, contact info); no account access or transactions yet.
+Currently configured as a bank branch receptionist: it answers informational questions
+(branches, hours, services, contact info) and can take two actions — block a lost/stolen card
+after identity verification, and log a callback request from a human representative. It still
+cannot check balances or make transactions.
 
 ## Domain config
 
@@ -26,11 +28,13 @@ processes in separate Python environments.
 ## Repository layout
 
 ```
-src/       Python services — server.py (STT+LLM+WebSocket), chatterbox_server.py (TTS), gen_reference.py
+src/       Python services — server.py (STT+LLM+WebSocket), chatterbox_server.py (TTS),
+           gen_reference.py, banking.py (verification/handoff logic), db.py (SQLite), seed_db.py
 web/       Browser frontend — index.html, pcm-worklet.js (served statically)
 config/    bank_config.json — swappable domain/brand config
-data/      memory.json — runtime long-term memory (gitignored)
+data/      memory.json (long-term memory) + bank.db (SQLite customer/audit/handoff) — gitignored
 assets/    voice_seed/ (TTS reference clips), audio_samples/ (sample recordings)
+tests/     pytest suite for the card-block / handoff logic
 Plans/     Design/planning docs
 logs/      Runtime logs (gitignored)
 run.sh     Launches the whole pipeline
@@ -66,6 +70,18 @@ run.sh     Launches the whole pipeline
   fabricate a branch, phone number, or policy that isn't in `config/bank_config.json`, won't attempt
   account lookups or transactions (points callers to the app, a branch, or customer care
   instead), and redirects off-topic questions back to banking.
+- **Card blocking with identity verification** — if a caller wants to block a lost/stolen card,
+  the agent collects three factors one at a time (card last 4, mother's maiden name, date of
+  birth) and calls a `block_card` tool. **All matching happens in Python** (`src/banking.py`),
+  never in the LLM — the model only collects answers and never learns whether they were right.
+  The tool result is a bare status code (`blocked` / `declined` / `handed_off`), so no
+  prompt-injection can extract the stored answers, and unknown cards are reported identically to
+  wrong answers (no card enumeration). Two failed attempts per call auto-queues a human handoff.
+  Every attempt is written to an `audit_log` table. Customer data lives in `data/bank.db` (SQLite).
+- **Human handoff (callback ticket)** — there's no telephony/transfer layer yet, so instead of
+  giving out the bank's number (which loops back to this very agent), a request for a human calls
+  `request_human_handoff`, which queues a ticket in `data/bank.db` and promises a callback within
+  one business day.
 - **File upload fallback** — the 📁 button lets you upload an audio file directly
   (any format ffmpeg can decode) instead of using the mic.
 
@@ -73,6 +89,13 @@ run.sh     Launches the whole pipeline
 
 **Prerequisites:** Ollama running, and the SearXNG docker container up (`docker start <container>`,
 listening on host port 1234).
+
+**One-time setup:** seed the customer database used for card-block verification:
+```bash
+python3 src/seed_db.py
+```
+This creates `data/bank.db` with a few fake test customers (re-run any time to reset them).
+Run the tests with `pytest tests/ -q`.
 
 **Quick start:**
 ```bash
