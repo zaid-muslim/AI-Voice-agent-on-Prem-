@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import io
+import os
 
 import soundfile as sf
 import torch
@@ -8,7 +9,10 @@ from chatterbox.tts_turbo import ChatterboxTurboTTS
 from fastapi import FastAPI, Response
 from pydantic import BaseModel
 
-REFERENCE_AUDIO = "reference_trump.wav"
+# Anchor asset paths to the project root (parent of src/) so they resolve no
+# matter what directory the process is launched from.
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REFERENCE_AUDIO = os.path.join(PROJECT_ROOT, "assets", "voice_seed", "reference_trump.wav")
 PORT = 8766
 
 app = FastAPI()

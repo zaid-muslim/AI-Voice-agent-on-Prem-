@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Voice agent WebSocket server.
-Run: python3 server.py
+Run: python3 src/server.py
 """
 
 import asyncio, base64, json, os, re, subprocess, time
@@ -21,8 +21,12 @@ WEB_SEARCH_RESULT_COUNT = 4
 MIN_TTS_CHARS  = 25   # sentences shorter than this ("Sure!") merge into the next one
 WS_PORT        = 8765
 
+# Anchor data/config paths to the project root (parent of src/) so they resolve
+# no matter what directory the process is launched from.
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 # ── Long-term memory (persists across sessions, unlike per-connection chat history) ──
-MEMORY_FILE      = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memory.json")
+MEMORY_FILE      = os.path.join(PROJECT_ROOT, "data", "memory.json")
 MAX_MEMORIES     = 60   # cap injected facts to bound prompt size
 
 def load_memories() -> list[str]:
@@ -43,6 +47,7 @@ def save_memory(fact: str) -> bool:
         return False
     existing.append(fact)
     try:
+        os.makedirs(os.path.dirname(MEMORY_FILE), exist_ok=True)
         with open(MEMORY_FILE, "w") as f:
             json.dump(existing[-MAX_MEMORIES:], f, indent=2)
     except OSError as e:
@@ -52,7 +57,7 @@ def save_memory(fact: str) -> bool:
     return True
 
 # ── Domain config (swap this file to retarget the bot at a different brand/company) ──
-DOMAIN_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bank_config.json")
+DOMAIN_CONFIG_FILE = os.path.join(PROJECT_ROOT, "config", "bank_config.json")
 
 def load_domain_config() -> dict:
     """Read fresh on every prompt build (like memory) so editing the JSON takes effect

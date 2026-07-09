@@ -6,10 +6,10 @@ Currently configured as a bank branch receptionist — conversational and inform
 
 ## Domain config
 
-All brand/company-specific data lives in `bank_config.json` — bank name, branches, hours,
+All brand/company-specific data lives in `config/bank_config.json` — bank name, branches, hours,
 services, and contact info. To retarget the bot at a different bank or company, just edit
 that file (it's re-read on every turn, no restart needed) and update the persona wording in
-`build_system_prompt()` in `server.py` if the domain changes (e.g. from a bank to a clinic).
+`build_system_prompt()` in `src/server.py` if the domain changes (e.g. from a bank to a clinic).
 The bot greets automatically the moment a call connects (a WebSocket connection opens) —
 before the caller says anything — using the same LLM+TTS pipeline as any other turn, so it
 can be interrupted like any other response.
@@ -20,8 +20,21 @@ can be interrupted like any other response.
 Speech Input → Speech-to-Text (STT) → Response Generation (LLM) → Text-to-Speech (TTS) → Voice Output
 ```
 
-`server.py` (STT + LLM orchestration) and `chatterbox_server.py` (TTS microservice) run as separate
+`src/server.py` (STT + LLM orchestration) and `src/chatterbox_server.py` (TTS microservice) run as separate
 processes in separate Python environments.
+
+## Repository layout
+
+```
+src/       Python services — server.py (STT+LLM+WebSocket), chatterbox_server.py (TTS), gen_reference.py
+web/       Browser frontend — index.html, pcm-worklet.js (served statically)
+config/    bank_config.json — swappable domain/brand config
+data/      memory.json — runtime long-term memory (gitignored)
+assets/    voice_seed/ (TTS reference clips), audio_samples/ (sample recordings)
+Plans/     Design/planning docs
+logs/      Runtime logs (gitignored)
+run.sh     Launches the whole pipeline
+```
 
 ## Models
 
@@ -37,20 +50,20 @@ processes in separate Python environments.
   listening on. The browser streams raw 16kHz PCM audio to the server via an
   `AudioWorklet` (`pcm-worklet.js`); the server runs [`webrtcvad`](https://github.com/wiseman/py-webrtcvad)
   frame-by-frame to detect when you start and stop talking, and only then transcribes
-  and responds — no manual recording step.
+  and responds — no manual recording step. (`pcm-worklet.js` lives in `web/`.)
 - **Automatic barge-in** — the moment the server's VAD confirms you've started talking
   again (even mid-response), it immediately cancels whatever the agent is doing (LLM +
   TTS) and starts processing your new utterance. No button press needed.
 - **Conversation memory** — history persists per browser session (last ~10 exchanges) via
   Ollama's `/api/chat`.
 - **Long-term memory** — durable facts about the caller (name, or anything explicitly asked
-  to be remembered) survive across sessions via a `remember` tool, stored in `memory.json`
-  and injected into the system prompt every turn. Delete `memory.json` to wipe it.
+  to be remembered) survive across sessions via a `remember` tool, stored in `data/memory.json`
+  and injected into the system prompt every turn. Delete `data/memory.json` to wipe it.
 - **Web search** — scoped strictly to bank/finance-relevant lookups (e.g. exchange rates)
   backed by a local [SearXNG](https://github.com/searxng/searxng) instance
   (`http://localhost:1234`). Anything unrelated to banking gets redirected, not searched.
 - **Scope guarding** — the bot stays in character as the bank's receptionist: it won't
-  fabricate a branch, phone number, or policy that isn't in `bank_config.json`, won't attempt
+  fabricate a branch, phone number, or policy that isn't in `config/bank_config.json`, won't attempt
   account lookups or transactions (points callers to the app, a branch, or customer care
   instead), and redirects off-topic questions back to banking.
 - **File upload fallback** — the 📁 button lets you upload an audio file directly
@@ -70,8 +83,8 @@ cleanly on `Ctrl+C`.
 
 **Manual steps** (equivalent to the above):
 1. Start Ollama: `ollama serve`
-2. Start the Chatterbox TTS service: `.chatterbox-venv/bin/python3 chatterbox_server.py`
-3. Start the main server: `python3 server.py`
-4. Serve the UI: `python3 -m http.server 3000`
+2. Start the Chatterbox TTS service: `.chatterbox-venv/bin/python3 src/chatterbox_server.py`
+3. Start the main server: `python3 src/server.py`
+4. Serve the UI: `python3 -m http.server 3000 --directory web`
 5. Open the app at [http://127.0.0.1:3000](http://127.0.0.1:3000)
 

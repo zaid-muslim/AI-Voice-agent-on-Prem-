@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.chatterbox-venv/
+
+# Logs
+logs/
+*.log
+
+# Runtime state (long-term memory is per-deployment caller data)
+data/memory.json
+
+# Claude Code local state
+.claude/scheduled_tasks.lock

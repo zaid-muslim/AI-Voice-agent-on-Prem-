@@ -7,8 +7,11 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 
 MINICONDA_PY="/home/nauyan/miniconda3/bin/python3"
 CHATTERBOX_PY=".chatterbox-venv/bin/python3"
-CHATTERBOX_LOG="chatterbox.log"
+CHATTERBOX_LOG="logs/chatterbox.log"
+WEB_DIR="web"
 HTTP_PORT=3000
+
+mkdir -p logs
 
 pids=()
 cleanup() {
@@ -28,7 +31,7 @@ if ! curl -s -o /dev/null "http://localhost:1234/search?q=test&format=json"; the
 fi
 
 echo "Starting Chatterbox Turbo TTS service..."
-"$CHATTERBOX_PY" -u chatterbox_server.py > "$CHATTERBOX_LOG" 2>&1 &
+"$CHATTERBOX_PY" -u src/chatterbox_server.py > "$CHATTERBOX_LOG" 2>&1 &
 pids+=($!)
 
 echo "Waiting for Chatterbox to be ready (this can take ~10-60s)..."
@@ -42,9 +45,9 @@ done
 echo "Chatterbox ready."
 
 echo "Starting static file server on port $HTTP_PORT..."
-python3 -m http.server "$HTTP_PORT" > /dev/null 2>&1 &
+python3 -m http.server "$HTTP_PORT" --directory "$WEB_DIR" > /dev/null 2>&1 &
 pids+=($!)
 
 echo "Open http://localhost:$HTTP_PORT in your browser (use 127.0.0.1 if 'localhost' misbehaves)."
 echo "Starting main server (STT + LLM + WebSocket)..."
-"$MINICONDA_PY" -u server.py
+"$MINICONDA_PY" -u src/server.py
