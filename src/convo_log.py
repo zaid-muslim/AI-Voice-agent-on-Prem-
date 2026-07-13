@@ -38,9 +38,17 @@ def _timing_str(timings: dict | None) -> str:
 def _retrieval_lines(retrieval: dict | None) -> list[str]:
     if retrieval is None:
         return ["RETRIEVAL: (skipped)"]
-    q = retrieval.get("query", "")
     status = retrieval.get("status")
-    lines = [f"RETRIEVAL (query={q!r}) -> {status}"]
+    queries = retrieval.get("queries", [])
+    lines = [f"RETRIEVAL -> {status}"]
+    if len(queries) <= 1:
+        lines.append(f"  query: {(queries[0] if queries else '')!r}")
+    else:
+        # Hybrid search: the raw utterance plus a context-expanded query; results are merged.
+        lines.append(f"  queries searched (hybrid, {len(queries)}, results merged):")
+        lines.append(f"    (raw)     {queries[0]!r}")
+        for q in queries[1:]:
+            lines.append(f"    (+context){q!r}")
     for r in retrieval.get("results", []):
         score = r.get("score")
         score_str = f"{score:.3f}" if isinstance(score, (int, float)) else "?"

@@ -30,6 +30,20 @@ if ! curl -s -o /dev/null "http://localhost:1234/search?q=test&format=json"; the
     echo "Warning: SearXNG doesn't seem to be reachable on localhost:1234 — web search will fail until it's up."
 fi
 
+# Ensure the RAG document index exists before serving. It's a regenerable, gitignored artifact
+# (data/rag_index.npy) — but without it, always-on retrieval finds nothing and the agent answers
+# "I don't have that on file" for every product/fee/rate/policy question, which looks like the whole
+# knowledge base is broken. Build it if missing; refuse to start (loudly) if the build fails.
+RAG_INDEX="data/rag_index.npy"
+if [ ! -f "$RAG_INDEX" ]; then
+    echo "RAG index ($RAG_INDEX) missing — building it from config/rag_docs/ (one-time, ~20s)..."
+    if ! "$MINICONDA_PY" -u src/build_index.py; then
+        echo "ERROR: failed to build the RAG index — refusing to start. Fix the error above and" >&2
+        echo "retry; the agent would otherwise report no information for every business question." >&2
+        exit 1
+    fi
+fi
+
 echo "Starting Chatterbox Turbo TTS service..."
 "$CHATTERBOX_PY" -u src/chatterbox_server.py > "$CHATTERBOX_LOG" 2>&1 &
 pids+=($!)

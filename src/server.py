@@ -698,9 +698,12 @@ async def respond_to_transcript(ws, transcript: str, history: list, session: dic
     # context-expanded query (resolves pronoun follow-ups like "the eligibility for it?").
     t_retr = time.time()
     retrieval_query = rag.build_retrieval_query(history)
-    retrieval = rag.search_docs_multi([transcript, retrieval_query], k=RAG_INJECT_TOP_K)
+    # Hybrid: the raw utterance plus the context-expanded query (deduped when identical, e.g. the
+    # first turn where there's no prior context to add).
+    search_queries = [transcript] if retrieval_query == transcript else [transcript, retrieval_query]
+    retrieval = rag.search_docs_multi(search_queries, k=RAG_INJECT_TOP_K)
     retrieval_ms = (time.time() - t_retr) * 1000
-    retrieval_log = {"query": retrieval_query, "status": retrieval["status"],
+    retrieval_log = {"queries": search_queries, "status": retrieval["status"],
                      "results": retrieval.get("results", [])}
 
     # Inject the retrieved chunks as an ephemeral system message positioned right before the

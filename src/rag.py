@@ -69,16 +69,23 @@ def warmup() -> None:
         list(_embed_model.query_embed(["warmup"]))
 
 
-def build_retrieval_query(history: list[dict], window: int = 3, max_prev_chars: int = 200) -> str:
+def build_retrieval_query(history: list[dict], window: int = 3, max_prev_chars: int = 150) -> str:
     """Build the text to embed for retrieval from recent conversation, so a pronoun-y follow-up
     ("what's the age eligibility for it?") still retrieves the right document. A bare utterance
     embeds toward generic terms ("eligibility") and pulls the wrong account; prepending the last
     exchange carries the topic (whether it was named in the caller's question or the agent's prior
     answer). Measured effect on the hard follow-up case: correct chunk rank 2 @ 0.69 -> rank 1 @ 0.96.
 
-    `history` ends with the current user turn. Uses the last `window` user/assistant messages,
-    capping prior ones to `max_prev_chars` so the current utterance stays dominant."""
+    This is only ever one of two hybrid queries (see search_docs_multi) — the raw utterance is always
+    searched too — so the prepended context can only help recall, never suppress the plain question.
+
+    `history` ends with the current user turn. Leading assistant messages (the opening greeting,
+    which precedes any real question) are dropped so boilerplate doesn't pollute the query. Uses the
+    last `window` user/assistant messages, capping prior ones to `max_prev_chars` so the current
+    utterance stays dominant."""
     msgs = [m for m in history if m.get("role") in ("user", "assistant") and m.get("content")]
+    while msgs and msgs[0]["role"] == "assistant":   # drop the greeting (assistant, no prior user)
+        msgs.pop(0)
     recent = msgs[-window:]
     parts = []
     for i, m in enumerate(recent):
