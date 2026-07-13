@@ -2,9 +2,10 @@
 
 Local, real-time voice assistant: speech in → transcription → LLM response → cloned-voice speech out.
 Currently configured as a bank branch receptionist: it answers informational questions
-(branches, hours, services, contact info) and can take two actions — block a lost/stolen card
-after identity verification, and log a callback request from a human representative. It still
-cannot check balances or make transactions.
+(branches, hours, services, contact info, and detailed product/fee/rate/policy questions grounded
+in its own documents) and can take two actions — block a lost/stolen card after identity
+verification, and log a callback request from a human representative. It still cannot check
+balances or make transactions.
 
 ## Domain config
 
@@ -29,12 +30,16 @@ processes in separate Python environments.
 
 ```
 src/       Python services — server.py (STT+LLM+WebSocket), chatterbox_server.py (TTS),
-           gen_reference.py, banking.py (verification/handoff logic), db.py (SQLite), seed_db.py
+           gen_reference.py, banking.py (verification/handoff logic), db.py (SQLite), seed_db.py,
+           rag.py (search_business_docs retrieval), build_index.py (offline doc ingestion)
 web/       Browser frontend — index.html, pcm-worklet.js (served statically)
 config/    bank_config.json — swappable domain/brand config
-data/      memory.json (long-term memory) + bank.db (SQLite customer/audit/handoff) — gitignored
+           rag_docs/ — Markdown source docs for search_business_docs (checked in, human-edited)
+data/      memory.json (long-term memory), bank.db (SQLite: customer/audit/handoff/rag_chunks),
+           rag_index.npy (embedding matrix) — all gitignored, regenerable
 assets/    voice_seed/ (TTS reference clips), audio_samples/ (sample recordings)
-tests/     pytest suite for the card-block / handoff logic
+tests/     pytest suite for card-block/handoff logic (test_banking.py) and RAG retrieval/chunking
+           logic (test_rag.py)
 Plans/     Design/planning docs
 logs/      Runtime logs (gitignored)
 run.sh     Launches the whole pipeline
@@ -86,6 +91,13 @@ run.sh     Launches the whole pipeline
   giving out the bank's number (which loops back to this very agent), a request for a human calls
   `request_human_handoff`, which queues a ticket in `data/bank.db` and promises a callback within
   one business day.
+- **Grounded business-info answers (RAG)** — detailed product/fee/rate/policy questions are
+  answered via a `search_business_docs` tool (`src/rag.py`) instead of the LLM's own knowledge or
+  `web_search`. Retrieval runs entirely on CPU (fastembed, `BAAI/bge-small-en-v1.5`, ONNX INT8) —
+  no GPU/VRAM contention with Whisper/Ollama/Chatterbox — over a flat NumPy cosine-similarity index
+  built from Markdown docs in `config/rag_docs/` by `src/build_index.py`. Below-threshold or
+  missing matches return `no_match` rather than letting the model guess a rate or fee, and the
+  system prompt forbids reading document/section names aloud.
 - **File upload fallback** — the 📁 button lets you upload an audio file directly
   (any format ffmpeg can decode) instead of using the mic.
 
@@ -99,6 +111,15 @@ listening on host port 1234).
 python3 src/seed_db.py
 ```
 This creates `data/bank.db` with a few fake test customers (re-run any time to reset them).
+
+Also build the business-doc search index (needed for `search_business_docs` to return real
+results — otherwise it reports `no_match` for everything):
+```bash
+python3 src/build_index.py
+```
+This chunks the Markdown docs in `config/rag_docs/`, embeds them, and writes `data/bank.db`'s
+`rag_chunks` table plus `data/rag_index.npy`. Safe to re-run any time the docs change.
+
 Run the tests with `pytest tests/ -q`.
 
 **Quick start:**

@@ -9,11 +9,14 @@ __pycache__/
 logs/
 *.log
 
+Plans/
+
 # Runtime state (per-deployment caller data — regenerate the DB with src/seed_db.py)
 data/memory.json
 data/bank.db
 data/bank.db-wal
 data/bank.db-shm
+data/rag_index.npy   # regenerate with src/build_index.py
 
 # Claude Code local state
 .claude/scheduled_tasks.lock

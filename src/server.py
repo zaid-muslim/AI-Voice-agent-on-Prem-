@@ -13,6 +13,7 @@ from faster_whisper import WhisperModel
 
 import banking
 import db
+import rag
 
 # ── Config ────────────────────────────────────────────────────────────────────
 OLLAMA_URL     = "http://localhost:11434/api/chat"
@@ -222,7 +223,27 @@ REQUEST_HUMAN_HANDOFF_TOOL = {
     },
 }
 
-TOOLS = [WEB_SEARCH_TOOL, REMEMBER_TOOL, BLOCK_CARD_TOOL, REQUEST_HUMAN_HANDOFF_TOOL]
+SEARCH_BUSINESS_DOCS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "search_business_docs",
+        "description": (
+            "Search the bank's own internal documents for information about products, policies, "
+            "fees, interest rates, or account terms. Use this for ANY factual question about the "
+            "bank's offerings — never answer such questions from your own knowledge, and never use "
+            "web_search for them."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The customer's question, in their own words"},
+            },
+            "required": ["query"],
+        },
+    },
+}
+
+TOOLS = [WEB_SEARCH_TOOL, REMEMBER_TOOL, BLOCK_CARD_TOOL, REQUEST_HUMAN_HANDOFF_TOOL, SEARCH_BUSINESS_DOCS_TOOL]
 
 
 def build_system_prompt() -> str:
@@ -262,8 +283,9 @@ def build_system_prompt() -> str:
         "or any other language, always reply using Roman transliteration (e.g. Roman Urdu) in the "
         "Latin alphabet, never in native script, or the synthesizer will fail. "
         "Stay strictly in character and in scope: you only handle questions about this bank — "
-        "branches, hours, contact info, and the general services listed above. Beyond answering "
-        "questions, the only actions you can take are blocking a lost or stolen card after identity "
+        "branches, hours, contact info, the general services listed above, and detailed product, "
+        "fee, rate, and policy questions answered via your search_business_docs tool. Beyond "
+        "answering questions, the only actions you can take are blocking a lost or stolen card after identity "
         "verification, and logging a callback request from a human representative — both described "
         "below. You still cannot check anyone's account, balance, or transactions, move money, or take "
         "any other action on an account; if asked for those, politely explain you can't and point them "
@@ -277,6 +299,24 @@ def build_system_prompt() -> str:
         "service info you already have. If you do search, say ONE short natural line first, like "
         "'let me check that for you', exactly once, then call the tool. Once results come back, "
         "answer directly from them in your own words, never reading out titles or URLs. "
+        "You also have a search_business_docs tool for any question about this bank's own products, "
+        "accounts, fees, interest rates, or policies. This rule is critical: EVERY single time the "
+        "caller asks about a product, account, fee, rate, or policy — including a follow-up question "
+        "later in the same conversation, even about something you already looked up moments ago — "
+        "your only allowed first action is to call search_business_docs again, silently, with no "
+        "spoken line before it. Do not say 'let me check' or anything else first — just call the tool "
+        "immediately. Never answer such a question from memory of an earlier result in this "
+        "conversation; a new question needs a new search, every time, no exceptions. Never use "
+        "web_search for these questions and never answer from your own knowledge — web_search is only "
+        "for things not in your own documents, like current external exchange rates. If "
+        "search_business_docs returns no results, or the results don't actually contain a clear "
+        "answer to what was asked, tell the caller you don't have that specific information on file "
+        "rather than guessing, inferring, or generalizing — and offer to log a callback request if it "
+        "seems important to them. Do not blend details from a different product or account into your "
+        "answer just because it appeared in the results — only use what is specifically about the "
+        "thing asked about. Once results come back, answer directly from them in your own words — "
+        "never read out a document name, section heading, or source label; those exist only for your "
+        "own reference. "
         "You also have a remember tool for long-term memory. Call it whenever the caller shares a "
         "durable fact worth keeping for next time — their name, or something they explicitly ask you "
         "to remember. Don't announce that you're saving it, and don't save trivia or one-off details. "
@@ -564,6 +604,16 @@ async def process_turn(ws, audio_array: np.ndarray, history: list, session: dict
     await respond_to_transcript(ws, transcript, history, session, t0)
 
 
+async def process_text_input(ws, text: str, history: list, session: dict):
+    """Entry point for the typed-text UI path — skips STT entirely (there's no audio to
+    transcribe); everything downstream (LLM + tool-calling + guardrails + TTS) is identical to
+    the audio paths, since respond_to_transcript() only ever needs a plain transcript string."""
+    t0 = time.time()
+    await ws.send(json.dumps({"type": "transcript", "text": text}))
+    print(f"Text input: {text}")
+    await respond_to_transcript(ws, text, history, session, t0)
+
+
 async def process_uploaded_audio(ws, audio_bytes: bytes, history: list, session: dict):
     """Entry point for the file-upload path — arbitrary format, needs ffmpeg decode."""
     t0 = time.time()
@@ -655,7 +705,8 @@ async def respond_to_transcript(ws, transcript: str, history: list, session: dic
                 {"role": "assistant", "content": reply, "tool_calls": tool_calls}
             )
             # Execute every tool the model asked for, appending each result.
-            block_status = None   # set iff the model called block_card this turn
+            block_status = None      # set iff the model called block_card this turn
+            other_tool_called = False   # set if any non-block_card tool was also called this turn
             for call in tool_calls:
                 fn = call.get("function", {})
                 name = fn.get("name")
@@ -664,9 +715,11 @@ async def respond_to_transcript(ws, transcript: str, history: list, session: dic
                     query = args.get("query", "").strip()
                     print(f"  Web search: {query}")
                     result = await web_search(query) if query else "No search query was given."
+                    other_tool_called = True
                 elif name == "remember":
                     fact = args.get("fact", "").strip()
                     result = "Saved to memory." if save_memory(fact) else "Already knew that."
+                    other_tool_called = True
                 elif name == "block_card":
                     # All verification/matching happens in Python; only a status code comes back
                     # to the model — never the stored maiden name/DOB (anti prompt-injection).
@@ -678,8 +731,16 @@ async def respond_to_transcript(ws, transcript: str, history: list, session: dic
                     outcome = banking.queue_handoff(DB_CONN, args)
                     print(f"  request_human_handoff -> ticket {outcome.get('ticket_id')}")
                     result = json.dumps(outcome)
+                    other_tool_called = True
+                elif name == "search_business_docs":
+                    query = args.get("query", "").strip()
+                    outcome = rag.search_docs(query) if query else {"status": "no_match"}
+                    print(f"  search_business_docs -> {outcome['status']} ({len(outcome.get('results', []))} results)")
+                    result = json.dumps(outcome)
+                    other_tool_called = True
                 else:
                     result = f"Unsupported tool: {name}"
+                    other_tool_called = True
                 turns_to_commit.append(
                     {"role": "tool", "content": result, "tool_call_id": call.get("id", "")}
                 )
@@ -693,9 +754,12 @@ async def respond_to_transcript(ws, transcript: str, history: list, session: dic
                 # guarantee: what the caller hears about their card is exactly what the DB did.
                 spoken = await say(ws, CARD_OUTCOME_LINES.get(block_status, NEUTRAL_FALLBACK))
                 turns_to_commit.append({"role": "assistant", "content": spoken})
-            else:
-                # Non-block tools (web_search / remember / handoff): let the model phrase a natural
-                # follow-up grounded in the results, with the guardrail still active as a backstop.
+
+            if other_tool_called:
+                # Any non-block tool (web_search / remember / handoff / search_business_docs) still
+                # gets a natural spoken answer, even in the same turn as a card block — otherwise a
+                # mixed request ("what's your savings rate, and also block my card") would silently
+                # drop the non-card half. The guardrail stays active as a backstop either way.
                 guard2 = {}
                 follow_reply, _ = await speak_and_return(ws, history + turns_to_commit, None, guard=guard2)
                 if guard2.get("tripped"):
@@ -861,6 +925,13 @@ async def handle_client(ws):
                     state["current_task"] = asyncio.create_task(
                         process_uploaded_audio(ws, audio_bytes, history, session)
                     )
+                elif data.get("type") == "text_input":
+                    text = (data.get("text") or "").strip()
+                    if text:
+                        await cancel_current_turn(state["current_task"])
+                        state["current_task"] = asyncio.create_task(
+                            process_text_input(ws, text, history, session)
+                        )
 
     except websockets.exceptions.ConnectionClosed:
         print(f"Client disconnected: {ws.remote_address}")
@@ -877,6 +948,10 @@ async def main():
 if __name__ == "__main__":
     print("Loading STT model...")
     stt_model = WhisperModel("large-v3", compute_type="int8_float16", device="cuda", device_index=0)
+
+    print("Loading RAG embedding index...")
+    rag.init(DB_CONN)
+    rag.warmup()
 
     print("Models loaded. Starting server... (TTS served by chatterbox_server.py)")
     asyncio.run(main())

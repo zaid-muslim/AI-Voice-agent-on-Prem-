@@ -61,6 +61,31 @@
     color: #9aa0a6;
     font-size: 0.95rem;
   }
+  #textForm {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  #textInput {
+    flex: 1;
+    padding: 10px 14px;
+    border-radius: 8px;
+    border: 1px solid #2a2d34;
+    background: #1b1e25;
+    color: #e6e6e6;
+    font-size: 0.95rem;
+  }
+  #textInput:focus { outline: 1px solid #6ea8fe; }
+  #sendBtn {
+    padding: 10px 16px;
+    border-radius: 8px;
+    border: 1px solid #2a2d34;
+    background: #1b1e25;
+    color: #e6e6e6;
+    font-size: 0.95rem;
+    cursor: pointer;
+  }
+  #sendBtn:hover { background: #22262f; }
 </style>
 </head>
 <body>
@@ -72,6 +97,10 @@
     <input id="fileInput" type="file" accept="audio/*" style="display:none">
     <div id="status">Connecting…</div>
   </div>
+  <form id="textForm" autocomplete="off">
+    <input id="textInput" type="text" placeholder="Or type a message instead of speaking…">
+    <button id="sendBtn" type="submit">Send</button>
+  </form>
 
 <script>
 const historyEl = document.getElementById("history");
@@ -280,6 +309,25 @@ fileInput.addEventListener("change", async () => {
   } else if (ws.readyState === WebSocket.OPEN) {
     audioQueue.stopAll();
     ws.send(JSON.stringify({ type: "upload_audio", data: arrayBufferToBase64(buf) }));
+    setStatus("Thinking…");
+  } else {
+    setStatus("Not connected to server");
+  }
+});
+
+const textForm = document.getElementById("textForm");
+const textInput = document.getElementById("textInput");
+
+// Typed text skips STT entirely — the server takes the text as-is and runs the same
+// LLM (+ tool-calling) + TTS pipeline as a spoken turn.
+textForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const text = textInput.value.trim();
+  if (!text) return;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    audioQueue.stopAll();
+    ws.send(JSON.stringify({ type: "text_input", text }));
+    textInput.value = "";
     setStatus("Thinking…");
   } else {
     setStatus("Not connected to server");

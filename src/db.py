@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SQLite storage for the banking agent: customer records (for card-block identity
-verification), an audit log of every verification attempt, and a queue of human-handoff
-callback tickets.
+verification), an audit log of every verification attempt, a queue of human-handoff
+callback tickets, and the RAG document chunk metadata used by search_business_docs.
 
 All functions take an explicit connection so the same code backs the live server, the
 seed script, and the tests. The server opens one shared connection (see server.py);
@@ -39,6 +39,14 @@ CREATE TABLE IF NOT EXISTS handoff_tickets (
     reason      TEXT NOT NULL,
     created_at  TEXT NOT NULL,
     status      TEXT NOT NULL DEFAULT 'pending'
+);
+
+CREATE TABLE IF NOT EXISTS rag_chunks (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    doc_name    TEXT NOT NULL,    -- source markdown filename, e.g. savings_accounts.md
+    section     TEXT,             -- heading path the chunk came from, e.g. "Fees > Overdraft"
+    text        TEXT NOT NULL,    -- the chunk's raw text, grounded into the LLM's tool result
+    updated_at  TEXT NOT NULL     -- ISO timestamp of the build_index.py run that wrote this row
 );
 """
 
@@ -97,4 +105,36 @@ def write_audit(
         "INSERT INTO audit_log (ts, customer_id, action, detail) VALUES (?, ?, ?, ?)",
         (datetime.now().astimezone().isoformat(), customer_id, action, detail),
     )
+    conn.commit()
+
+
+def insert_rag_chunk(
+    conn: sqlite3.Connection,
+    doc_name: str,
+    section: str | None,
+    text: str,
+    updated_at: str | None = None,
+) -> int:
+    """Insert one chunk row. build_index.py calls this in the same order it embeds chunks, so
+    the resulting row id order matches the row order of the saved NumPy embedding matrix."""
+    updated_at = updated_at or datetime.now().astimezone().isoformat()
+    cur = conn.execute(
+        "INSERT INTO rag_chunks (doc_name, section, text, updated_at) VALUES (?, ?, ?, ?)",
+        (doc_name, section, text, updated_at),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def fetch_all_rag_chunks(conn: sqlite3.Connection) -> list[dict]:
+    """All chunks in insertion (id) order — matches the row order of the embedding matrix."""
+    rows = conn.execute("SELECT * FROM rag_chunks ORDER BY id ASC").fetchall()
+    return [dict(r) for r in rows]
+
+
+def clear_rag_chunks(conn: sqlite3.Connection) -> None:
+    """Wipe all chunks before a rebuild (build_index.py always rebuilds from scratch rather than
+    accumulating). Resets the autoincrement counter so ids restart at 1 on every rebuild."""
+    conn.execute("DELETE FROM rag_chunks")
+    conn.execute("DELETE FROM sqlite_sequence WHERE name = 'rag_chunks'")
     conn.commit()

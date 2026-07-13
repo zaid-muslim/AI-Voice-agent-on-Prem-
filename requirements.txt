@@ -4,3 +4,4 @@ numpy
 aiohttp>=3.9
 webrtcvad
 python-dateutil>=2.8   # tolerant parsing of spoken dates for card-block verification
+fastembed               # CPU-only ONNX embeddings (BAAI/bge-small-en-v1.5) for search_business_docs RAG tool
