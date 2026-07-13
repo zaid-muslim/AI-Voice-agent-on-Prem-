@@ -31,10 +31,10 @@ processes in separate Python environments.
 ```
 src/       Python services — server.py (STT+LLM+WebSocket), chatterbox_server.py (TTS),
            gen_reference.py, banking.py (verification/handoff logic), db.py (SQLite), seed_db.py,
-           rag.py (search_business_docs retrieval), build_index.py (offline doc ingestion)
+           rag.py (always-on retrieval), build_index.py (offline doc ingestion), convo_log.py
 web/       Browser frontend — index.html, pcm-worklet.js (served statically)
 config/    bank_config.json — swappable domain/brand config
-           rag_docs/ — Markdown source docs for search_business_docs (checked in, human-edited)
+           rag_docs/ — Markdown source docs for always-on RAG (checked in, human-edited)
 data/      memory.json (long-term memory), bank.db (SQLite: customer/audit/handoff/rag_chunks),
            rag_index.npy (embedding matrix) — all gitignored, regenerable
 assets/    voice_seed/ (TTS reference clips), audio_samples/ (sample recordings)
@@ -91,13 +91,23 @@ run.sh     Launches the whole pipeline
   giving out the bank's number (which loops back to this very agent), a request for a human calls
   `request_human_handoff`, which queues a ticket in `data/bank.db` and promises a callback within
   one business day.
-- **Grounded business-info answers (RAG)** — detailed product/fee/rate/policy questions are
-  answered via a `search_business_docs` tool (`src/rag.py`) instead of the LLM's own knowledge or
-  `web_search`. Retrieval runs entirely on CPU (fastembed, `BAAI/bge-small-en-v1.5`, ONNX INT8) —
-  no GPU/VRAM contention with Whisper/Ollama/Chatterbox — over a flat NumPy cosine-similarity index
-  built from Markdown docs in `config/rag_docs/` by `src/build_index.py`. Below-threshold or
-  missing matches return `no_match` rather than letting the model guess a rate or fee, and the
-  system prompt forbids reading document/section names aloud.
+- **Grounded business-info answers (always-on RAG)** — detailed product/fee/rate/policy questions
+  are answered from the document corpus, not the LLM's own knowledge. Retrieval is **not** a tool
+  the model chooses to call: the server retrieves on **every** turn (`src/rag.py`) and injects the
+  matching chunks into context before the LLM runs — so grounding never depends on the model
+  deciding to look something up, and it answers in a single LLM pass. The retrieval query is
+  context-aware (raw utterance + last exchange, hybrid-merged) so pronoun follow-ups ("what's the
+  eligibility for *it*?") resolve to the right document. Runs entirely on CPU (fastembed,
+  `BAAI/bge-small-en-v1.5`, ONNX INT8) — no GPU/VRAM contention with Whisper/Ollama/Chatterbox —
+  over a flat NumPy cosine-similarity index built from Markdown docs in `config/rag_docs/` by
+  `src/build_index.py`. When nothing clears the similarity threshold, no context is injected and the
+  prompt directs the agent to say it doesn't have that on file rather than guess. Document/section
+  names are never read aloud. (Swapping the NumPy index for a vector DB is a localized change in
+  `rag.py` when the corpus outgrows in-memory search.)
+- **Conversation + latency log** — every turn is appended to `logs/conversation.log` (gitignored):
+  the caller's input, the exact retrieved chunks with similarity scores, any tools called, the
+  spoken reply, and per-turn latency (`ttft` = query → first spoken word, retrieval time, total).
+  Built for diagnosis — a factual reply with weak/empty retrieval is a fabrication, visible at a glance.
 - **File upload fallback** — the 📁 button lets you upload an audio file directly
   (any format ffmpeg can decode) instead of using the mic.
 
@@ -112,8 +122,8 @@ python3 src/seed_db.py
 ```
 This creates `data/bank.db` with a few fake test customers (re-run any time to reset them).
 
-Also build the business-doc search index (needed for `search_business_docs` to return real
-results — otherwise it reports `no_match` for everything):
+Also build the business-doc search index (needed for the always-on RAG retrieval to return real
+results — otherwise it finds nothing and the agent says it has no info on file):
 ```bash
 python3 src/build_index.py
 ```

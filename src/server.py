@@ -4,7 +4,7 @@ Voice agent WebSocket server.
 Run: python3 src/server.py
 """
 
-import asyncio, base64, json, os, re, subprocess, time
+import asyncio, base64, json, os, re, subprocess, time, uuid
 from datetime import datetime
 import numpy as np
 import webrtcvad
@@ -12,6 +12,7 @@ import websockets
 from faster_whisper import WhisperModel
 
 import banking
+import convo_log
 import db
 import rag
 
@@ -23,6 +24,7 @@ CHATTERBOX_URL = "http://localhost:8766/synthesize"  # separate venv/process, se
 SEARXNG_URL    = "http://localhost:1234/search"       # SearXNG container: host port 1234 -> container 8080
 WEB_SEARCH_RESULT_COUNT = 4
 MIN_TTS_CHARS  = 25   # sentences shorter than this ("Sure!") merge into the next one
+RAG_INJECT_TOP_K = 4  # max business-doc chunks injected into context per turn (always-on retrieval)
 WS_PORT        = 8765
 
 # Anchor data/config paths to the project root (parent of src/) so they resolve
@@ -223,27 +225,11 @@ REQUEST_HUMAN_HANDOFF_TOOL = {
     },
 }
 
-SEARCH_BUSINESS_DOCS_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "search_business_docs",
-        "description": (
-            "Search the bank's own internal documents for information about products, policies, "
-            "fees, interest rates, or account terms. Use this for ANY factual question about the "
-            "bank's offerings — never answer such questions from your own knowledge, and never use "
-            "web_search for them."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "The customer's question, in their own words"},
-            },
-            "required": ["query"],
-        },
-    },
-}
-
-TOOLS = [WEB_SEARCH_TOOL, REMEMBER_TOOL, BLOCK_CARD_TOOL, REQUEST_HUMAN_HANDOFF_TOOL, SEARCH_BUSINESS_DOCS_TOOL]
+# Business-info retrieval is NOT a tool: the server retrieves from the document corpus on every
+# turn and injects the results into context (see respond_to_transcript). This is deliberate — the
+# model can't be relied on to decide to look something up, and always-on retrieval also answers in
+# a single LLM pass instead of the two passes a tool call needs.
+TOOLS = [WEB_SEARCH_TOOL, REMEMBER_TOOL, BLOCK_CARD_TOOL, REQUEST_HUMAN_HANDOFF_TOOL]
 
 
 def build_system_prompt() -> str:
@@ -284,8 +270,8 @@ def build_system_prompt() -> str:
         "Latin alphabet, never in native script, or the synthesizer will fail. "
         "Stay strictly in character and in scope: you only handle questions about this bank — "
         "branches, hours, contact info, the general services listed above, and detailed product, "
-        "fee, rate, and policy questions answered via your search_business_docs tool. Beyond "
-        "answering questions, the only actions you can take are blocking a lost or stolen card after identity "
+        "fee, rate, and policy questions answered from the reference information provided to you. "
+        "Beyond answering questions, the only actions you can take are blocking a lost or stolen card after identity "
         "verification, and logging a callback request from a human representative — both described "
         "below. You still cannot check anyone's account, balance, or transactions, move money, or take "
         "any other action on an account; if asked for those, politely explain you can't and point them "
@@ -299,24 +285,19 @@ def build_system_prompt() -> str:
         "service info you already have. If you do search, say ONE short natural line first, like "
         "'let me check that for you', exactly once, then call the tool. Once results come back, "
         "answer directly from them in your own words, never reading out titles or URLs. "
-        "You also have a search_business_docs tool for any question about this bank's own products, "
-        "accounts, fees, interest rates, or policies. This rule is critical: EVERY single time the "
-        "caller asks about a product, account, fee, rate, or policy — including a follow-up question "
-        "later in the same conversation, even about something you already looked up moments ago — "
-        "your only allowed first action is to call search_business_docs again, silently, with no "
-        "spoken line before it. Do not say 'let me check' or anything else first — just call the tool "
-        "immediately. Never answer such a question from memory of an earlier result in this "
-        "conversation; a new question needs a new search, every time, no exceptions. Never use "
-        "web_search for these questions and never answer from your own knowledge — web_search is only "
-        "for things not in your own documents, like current external exchange rates. If "
-        "search_business_docs returns no results, or the results don't actually contain a clear "
-        "answer to what was asked, tell the caller you don't have that specific information on file "
-        "rather than guessing, inferring, or generalizing — and offer to log a callback request if it "
-        "seems important to them. Do not blend details from a different product or account into your "
-        "answer just because it appeared in the results — only use what is specifically about the "
-        "thing asked about. Once results come back, answer directly from them in your own words — "
-        "never read out a document name, section heading, or source label; those exist only for your "
-        "own reference. "
+        "For questions about this bank's own products, accounts, fees, interest rates, or policies, "
+        "you will be given the relevant reference material as a message labelled 'Reference "
+        "information from the bank's documents' just before the caller's question, whenever the "
+        "system finds something relevant. Answer those questions ONLY from that provided reference "
+        "material (plus the branch/hours/service info above) — never from your own general knowledge, "
+        "and never use web_search for them. If no reference material is provided for the question, or "
+        "what's provided doesn't actually contain the specific detail asked for, tell the caller you "
+        "don't have that specific information on file rather than guessing, inferring, or generalizing "
+        "— and offer to log a callback request if it seems important to them. Do not blend details "
+        "from a different product or account into your answer just because it appears in the reference "
+        "material — only use what is specifically about the thing the caller asked about. Answer in "
+        "your own words; never read out a document name, section heading, or source label — those are "
+        "for your reference only. "
         "You also have a remember tool for long-term memory. Call it whenever the caller shares a "
         "durable fact worth keeping for next time — their name, or something they explicitly ask you "
         "to remember. Don't announce that you're saving it, and don't save trivia or one-off details. "
@@ -517,14 +498,17 @@ def split_sentences(buffer: str) -> tuple[list[str], str]:
 
 
 async def speak_stream(ws, sentence_q: asyncio.Queue, token_iter,
-                       guard: dict | None = None) -> tuple[str, list | None]:
+                       guard: dict | None = None, timings: dict | None = None) -> tuple[str, list | None]:
     """Consume a stream_llm() event stream: forward text tokens to the client as they arrive and
     queue completed sentences for TTS. Returns (spoken_text, tool_calls) — spoken_text is only what
     was actually voiced (so it's what goes to history), tool_calls is None if no tool was called.
 
     The model is never allowed to voice a "card blocked / identity verified" claim: any such sentence
     is suppressed (not spoken, not returned) and `guard["tripped"]` is set. A genuine block
-    confirmation is spoken deterministically by the server from the tool result, not by the model."""
+    confirmation is spoken deterministically by the server from the tool result, not by the model.
+
+    If `timings` is given, the wall-clock time of the first content token is recorded once as
+    `timings["first_token"]` — used to report time-to-first-word latency."""
     buffer = ""
     carry = ""   # short lead-in ("Sure!") waiting to be merged with the next sentence
     spoken_parts = []
@@ -549,6 +533,8 @@ async def speak_stream(ws, sentence_q: asyncio.Queue, token_iter,
             continue
 
         token = payload
+        if timings is not None and "first_token" not in timings:
+            timings["first_token"] = time.time()
         await ws.send(json.dumps({"type": "token", "text": token}))
         buffer += token
 
@@ -632,10 +618,10 @@ async def process_uploaded_audio(ws, audio_bytes: bytes, history: list, session:
 
 
 async def speak_and_return(ws, messages: list, tools: list | None,
-                           guard: dict | None = None) -> tuple[str, list | None]:
+                           guard: dict | None = None, timings: dict | None = None) -> tuple[str, list | None]:
     """Run one LLM pass with TTS playback pipelined to it. Returns (spoken_text, tool_calls).
     Shared by respond_to_transcript (real user turns) and greet_caller (opening greeting).
-    `guard` is forwarded to the block-claim guardrail in speak_stream."""
+    `guard` and `timings` are forwarded to speak_stream."""
     sentence_q = asyncio.Queue()
 
     async def tts_worker():
@@ -654,7 +640,7 @@ async def speak_and_return(ws, messages: list, tools: list | None,
     worker = asyncio.create_task(tts_worker())
     try:
         reply, tool_calls = await speak_stream(
-            ws, sentence_q, stream_llm(messages, tools=tools), guard=guard,
+            ws, sentence_q, stream_llm(messages, tools=tools), guard=guard, timings=timings,
         )
         await sentence_q.put(None)
         await worker
@@ -668,15 +654,25 @@ async def speak_and_return(ws, messages: list, tools: list | None,
                 pass
 
 
-async def greet_caller(ws, history: list):
+async def greet_caller(ws, history: list, session: dict):
     """Speak a welcome message the instant a call connects. The trigger isn't a real user
     message, so it's never committed to history — only the assistant's reply is — meaning
     history reads naturally starting from the caller's first real turn."""
     trigger = [{"role": "user", "content": "[The call has just connected. Greet the caller now.]"}]
+    t0 = time.time()
+    timings = {}
     try:
-        reply, _ = await speak_and_return(ws, trigger, None)
+        reply, _ = await speak_and_return(ws, trigger, None, timings=timings)
         if reply.strip():
             history.append({"role": "assistant", "content": reply})
+        try:
+            ft = timings.get("first_token")
+            convo_log.log_turn(
+                session.get("id", "?"), "[call connected — greeting]", None, [], reply,
+                {"ttft_ms": (ft - t0) * 1000 if ft else None, "total_ms": (time.time() - t0) * 1000},
+            )
+        except Exception as e:
+            print(f"  [convo_log] failed to log greeting: {e}")
         await ws.send(json.dumps({"type": "done"}))
     except asyncio.CancelledError:
         print("  Greeting interrupted")
@@ -693,12 +689,42 @@ async def respond_to_transcript(ws, transcript: str, history: list, session: dic
     # Assistant/tool turns are staged here and only committed to `history` once each step
     # actually finishes — so an interruption preserves exactly what really happened, no more.
     turns_to_commit = []
+    tool_events = []   # structured record of tools the model called this turn, for the convo log
+    timings = {}       # first_token time is recorded here by speak_stream
+
+    # Always-on retrieval: pull matching business-doc chunks BEFORE the LLM runs, so grounding never
+    # depends on the model choosing to look something up. Runs every turn; chit-chat matches nothing.
+    # Hybrid query: the raw utterance (keeps a fresh topical question well-represented) merged with a
+    # context-expanded query (resolves pronoun follow-ups like "the eligibility for it?").
+    t_retr = time.time()
+    retrieval_query = rag.build_retrieval_query(history)
+    retrieval = rag.search_docs_multi([transcript, retrieval_query], k=RAG_INJECT_TOP_K)
+    retrieval_ms = (time.time() - t_retr) * 1000
+    retrieval_log = {"query": retrieval_query, "status": retrieval["status"],
+                     "results": retrieval.get("results", [])}
+
+    # Inject the retrieved chunks as an ephemeral system message positioned right before the
+    # caller's current question (not persisted to history), so the model answers grounded in them.
+    messages = history
+    if retrieval["status"] == "found":
+        context_block = "\n\n".join(
+            f"[{r['source']} :: {r.get('section')}]\n{r['text']}" for r in retrieval["results"]
+        )
+        context_msg = {
+            "role": "system",
+            "content": "Reference information from the bank's documents, relevant to the caller's "
+                       "next question. Answer only from this and the bank info in your instructions; "
+                       "if the specific detail isn't here, say you don't have it on file.\n\n"
+                       + context_block,
+        }
+        messages = history[:-1] + [context_msg] + history[-1:]
 
     try:
-        # First pass runs with tools. The guardrail (in speak_stream) suppresses any block/verify
-        # claim the model tries to voice — a real confirmation is spoken by the server below.
+        # First pass runs with tools + the injected reference context. The guardrail (in speak_stream)
+        # suppresses any block/verify claim the model tries to voice — a real confirmation is spoken
+        # by the server below.
         guard1 = {}
-        reply, tool_calls = await speak_and_return(ws, history, TOOLS, guard=guard1)
+        reply, tool_calls = await speak_and_return(ws, messages, TOOLS, guard=guard1, timings=timings)
 
         if tool_calls:
             turns_to_commit.append(
@@ -716,10 +742,12 @@ async def respond_to_transcript(ws, transcript: str, history: list, session: dic
                     print(f"  Web search: {query}")
                     result = await web_search(query) if query else "No search query was given."
                     other_tool_called = True
+                    tool_events.append({"tool": "web_search", "query": query})
                 elif name == "remember":
                     fact = args.get("fact", "").strip()
                     result = "Saved to memory." if save_memory(fact) else "Already knew that."
                     other_tool_called = True
+                    tool_events.append({"tool": "remember", "fact": fact})
                 elif name == "block_card":
                     # All verification/matching happens in Python; only a status code comes back
                     # to the model — never the stored maiden name/DOB (anti prompt-injection).
@@ -727,17 +755,13 @@ async def respond_to_transcript(ws, transcript: str, history: list, session: dic
                     block_status = outcome["status"]
                     print(f"  block_card -> {block_status} (attempts={session.get('failed_card_attempts', 0)})")
                     result = json.dumps(outcome)
+                    tool_events.append({"tool": "block_card", "status": block_status})   # no PII
                 elif name == "request_human_handoff":
                     outcome = banking.queue_handoff(DB_CONN, args)
                     print(f"  request_human_handoff -> ticket {outcome.get('ticket_id')}")
                     result = json.dumps(outcome)
                     other_tool_called = True
-                elif name == "search_business_docs":
-                    query = args.get("query", "").strip()
-                    outcome = rag.search_docs(query) if query else {"status": "no_match"}
-                    print(f"  search_business_docs -> {outcome['status']} ({len(outcome.get('results', []))} results)")
-                    result = json.dumps(outcome)
-                    other_tool_called = True
+                    tool_events.append({"tool": "request_human_handoff", "ticket_id": outcome.get("ticket_id")})
                 else:
                     result = f"Unsupported tool: {name}"
                     other_tool_called = True
@@ -756,12 +780,13 @@ async def respond_to_transcript(ws, transcript: str, history: list, session: dic
                 turns_to_commit.append({"role": "assistant", "content": spoken})
 
             if other_tool_called:
-                # Any non-block tool (web_search / remember / handoff / search_business_docs) still
-                # gets a natural spoken answer, even in the same turn as a card block — otherwise a
-                # mixed request ("what's your savings rate, and also block my card") would silently
-                # drop the non-card half. The guardrail stays active as a backstop either way.
+                # Any non-block tool (web_search / remember / handoff) still gets a natural spoken
+                # answer, even in the same turn as a card block — otherwise a mixed request ("what's
+                # your savings rate, and also block my card") would silently drop the non-card half.
+                # The guardrail stays active as a backstop either way.
                 guard2 = {}
-                follow_reply, _ = await speak_and_return(ws, history + turns_to_commit, None, guard=guard2)
+                follow_reply, _ = await speak_and_return(ws, history + turns_to_commit, None,
+                                                         guard=guard2, timings=timings)
                 if guard2.get("tripped"):
                     await ws.send(json.dumps({"type": "guardrail"}))
                     follow_reply = await say(ws, NEUTRAL_FALLBACK)
@@ -785,6 +810,24 @@ async def respond_to_transcript(ws, transcript: str, history: list, session: dic
     finally:
         history.extend(turns_to_commit)
         del history[:-MAX_HISTORY_MESSAGES]
+        # Log the turn (latency + user input + retrieved chunks + tools + spoken reply). Best-effort
+        # — a logging failure must never break the call, and this runs even on interrupt/error so a
+        # partial turn is still recorded.
+        try:
+            spoken = " ".join(
+                m["content"] for m in turns_to_commit
+                if m.get("role") == "assistant" and m.get("content")
+            )
+            ft = timings.get("first_token")
+            log_timings = {
+                "ttft_ms": (ft - t0) * 1000 if ft else None,   # query -> first spoken LLM word
+                "retrieval_ms": retrieval_ms,
+                "total_ms": (time.time() - t0) * 1000,
+            }
+            convo_log.log_turn(session.get("id", "?"), transcript, retrieval_log,
+                               tool_events, spoken, log_timings)
+        except Exception as e:
+            print(f"  [convo_log] failed to log turn: {e}")
 
     await ws.send(json.dumps({"type": "done"}))
     print(f"Turn done ({time.time()-t0:.2f}s total)")
@@ -804,7 +847,8 @@ async def cancel_current_turn(current_task):
 async def handle_client(ws):
     print(f"Client connected: {ws.remote_address}")
     history = []   # conversation memory for this connection: [{"role": ..., "content": ...}, ...]
-    session = {"failed_card_attempts": 0}   # per-call state: card-verification attempt counter
+    # per-call state: a short id for the conversation log + the card-verification attempt counter
+    session = {"id": uuid.uuid4().hex[:8], "failed_card_attempts": 0}
     vad = webrtcvad.Vad(VAD_AGGRESSIVENESS)
 
     # VAD state — all mutated from the single-threaded frame loop below.
@@ -899,7 +943,7 @@ async def handle_client(ws):
     # Call connected: greet the caller immediately, before waiting for them to speak.
     # This runs through the same task/barge-in machinery as any other turn, so talking
     # over the greeting interrupts it exactly like interrupting any other response.
-    state["current_task"] = asyncio.create_task(greet_caller(ws, history))
+    state["current_task"] = asyncio.create_task(greet_caller(ws, history, session))
 
     try:
         async for message in ws:

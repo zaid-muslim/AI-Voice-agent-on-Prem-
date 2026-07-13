@@ -62,6 +62,47 @@ def test_parse_markdown_skips_empty_sections():
     assert chunks == [("B", "text under B")]
 
 
+# ── Context-aware retrieval query (rag.build_retrieval_query) ─────────────────────
+
+def test_build_retrieval_query_first_turn_is_just_current():
+    history = [{"role": "user", "content": "tell me about the rutba account"}]
+    assert rag.build_retrieval_query(history) == "tell me about the rutba account"
+
+
+def test_build_retrieval_query_prepends_last_exchange():
+    history = [
+        {"role": "user", "content": "something for old citizens"},
+        {"role": "assistant", "content": "The HBL Rutba account is for senior citizens aged 55 and above."},
+        {"role": "user", "content": "what is the age eligibility for it"},
+    ]
+    q = rag.build_retrieval_query(history)
+    # current utterance present in full, and prior exchange folded in to carry the topic
+    assert q.endswith("what is the age eligibility for it")
+    assert "Rutba" in q and "old citizens" in q
+
+
+def test_build_retrieval_query_caps_prior_context_but_not_current():
+    long_prev = "x" * 500
+    history = [
+        {"role": "assistant", "content": long_prev},
+        {"role": "user", "content": "current question in full"},
+    ]
+    q = rag.build_retrieval_query(history, max_prev_chars=200)
+    assert q.endswith("current question in full")
+    assert q.count("x") == 200   # prior message capped
+
+
+def test_build_retrieval_query_ignores_tool_and_system_messages():
+    history = [
+        {"role": "user", "content": "about rutba"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "1"}]},
+        {"role": "tool", "content": '{"status":"found"}', "tool_call_id": "1"},
+        {"role": "user", "content": "eligibility?"},
+    ]
+    q = rag.build_retrieval_query(history)
+    assert "found" not in q and q.endswith("eligibility?")
+
+
 def test_chunk_document_labels_with_doc_name():
     chunks = build_index.chunk_document("fees.md", FIXTURE_MD)
     assert all(c["doc_name"] == "fees.md" for c in chunks)
@@ -170,6 +211,29 @@ def test_search_docs_no_index_loaded_is_no_match(monkeypatch):
     monkeypatch.setattr(rag, "_doc_matrix", None)
     monkeypatch.setattr(rag, "_embed_model", FakeEmbedModel([1.0, 0.0, 0.0, 0.0]))
     assert rag.search_docs("anything") == {"status": "no_match"}
+
+
+class MultiFakeEmbedModel:
+    """Returns a different fixed vector per query string, so multi-query merge can be exercised."""
+    def __init__(self, mapping):
+        self.mapping = mapping
+
+    def query_embed(self, texts):
+        return [np.asarray(self.mapping[t], dtype=np.float32) for t in texts]
+
+
+def test_search_docs_multi_merges_best_score_per_chunk(monkeypatch):
+    # query "q_b" points at chunk b; query "q_c" points at chunk c. The merge should surface both.
+    monkeypatch.setattr(rag, "_doc_matrix", FIXTURE_MATRIX)
+    monkeypatch.setattr(rag, "_chunk_meta", FIXTURE_META)
+    monkeypatch.setattr(rag, "_embed_model", MultiFakeEmbedModel({
+        "q_b": [0.0, 1.0, 0.0, 0.0],
+        "q_c": [0.0, 0.0, 1.0, 0.0],
+    }))
+    out = rag.search_docs_multi(["q_b", "q_c"])
+    assert out["status"] == "found"
+    sources = {r["source"] for r in out["results"]}
+    assert "b.md" in sources and "c.md" in sources   # both query topics represented
 
 
 def test_search_docs_limits_to_top_k_sorted_by_similarity(monkeypatch):

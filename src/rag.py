@@ -69,26 +69,43 @@ def warmup() -> None:
         list(_embed_model.query_embed(["warmup"]))
 
 
-def search_docs(query: str) -> dict:
-    """Embed the caller's question and return the top matching chunks above the similarity
-    threshold. Returns {"status": "found", "results": [{"text","source","section"}, ...]} or
-    {"status": "no_match"} — never raw exceptions, never more than the chunk text itself."""
+def build_retrieval_query(history: list[dict], window: int = 3, max_prev_chars: int = 200) -> str:
+    """Build the text to embed for retrieval from recent conversation, so a pronoun-y follow-up
+    ("what's the age eligibility for it?") still retrieves the right document. A bare utterance
+    embeds toward generic terms ("eligibility") and pulls the wrong account; prepending the last
+    exchange carries the topic (whether it was named in the caller's question or the agent's prior
+    answer). Measured effect on the hard follow-up case: correct chunk rank 2 @ 0.69 -> rank 1 @ 0.96.
+
+    `history` ends with the current user turn. Uses the last `window` user/assistant messages,
+    capping prior ones to `max_prev_chars` so the current utterance stays dominant."""
+    msgs = [m for m in history if m.get("role") in ("user", "assistant") and m.get("content")]
+    recent = msgs[-window:]
+    parts = []
+    for i, m in enumerate(recent):
+        text = m["content"]
+        if i < len(recent) - 1:      # cap prior context; keep the current (last) utterance in full
+            text = text[:max_prev_chars]
+        parts.append(text)
+    return " ".join(parts).strip()
+
+
+def _scores_for(query: str):
+    """Cosine similarity of one query against every chunk, or None if retrieval isn't available."""
     query = (query or "").strip()
     if not query or _doc_matrix is None or _embed_model is None:
-        return {"status": "no_match"}
-
+        return None
     query_vec = next(iter(_embed_model.query_embed([query])))
     query_vec = np.asarray(query_vec, dtype=np.float32)
     norm = np.linalg.norm(query_vec)
     if norm == 0:
-        return {"status": "no_match"}
+        return None
     query_vec = query_vec / norm
+    return _doc_matrix @ query_vec   # single matmul (both sides L2-normalized)
 
-    scores = _doc_matrix @ query_vec   # cosine similarity, single matmul (both sides normalized)
-    order = np.argsort(scores)[::-1][:TOP_K]
 
+def _top_results(scores, k: int) -> list[dict]:
     results = []
-    for idx in order:
+    for idx in np.argsort(scores)[::-1][:k]:
         score = float(scores[idx])
         if score < SIMILARITY_THRESHOLD:
             continue
@@ -97,8 +114,53 @@ def search_docs(query: str) -> dict:
             "text": chunk["text"],
             "source": chunk["doc_name"],
             "section": chunk.get("section"),
+            "score": round(score, 4),   # cosine similarity, for logging/diagnostics
         })
+    return results
 
-    if not results:
+
+def search_docs(query: str) -> dict:
+    """Embed the caller's question and return the top matching chunks above the similarity
+    threshold. Returns {"status": "found", "results": [{"text","source","section","score"}, ...]}
+    or {"status": "no_match"} — never raw exceptions, never more than the chunk text itself."""
+    scores = _scores_for(query)
+    if scores is None:
         return {"status": "no_match"}
-    return {"status": "found", "results": results}
+    results = _top_results(scores, TOP_K)
+    return {"status": "found", "results": results} if results else {"status": "no_match"}
+
+
+def search_docs_multi(queries: list[str], k: int | None = None) -> dict:
+    """Retrieve for several query phrasings and interleave each query's top hits (round-robin,
+    de-duplicated) into a combined set of up to `k` chunks. Used for context-aware retrieval: pass
+    both the raw current utterance and a context-expanded query.
+
+    Interleaving (rather than a global score merge) is deliberate: when one query is *confidently
+    wrong* — e.g. a context-expanded query dominated by the previous answer scores unrelated chunks
+    at 0.78 while the raw utterance's correct chunk sits at 0.66 — a score merge would still bury the
+    correct chunk. Reserving slots per query guarantees the raw utterance's best matches are present
+    regardless of the other query's scores, so a fresh topical question and a pronoun follow-up are
+    both covered."""
+    k = k or TOP_K
+    per_query = []
+    for q in queries:
+        s = _scores_for(q)
+        if s is not None:
+            per_query.append(_top_results(s, k))
+    if not per_query:
+        return {"status": "no_match"}
+
+    merged, seen = [], set()
+    for rank in range(k):
+        for results in per_query:
+            if rank < len(results):
+                r = results[rank]
+                key = (r["source"], r["section"])
+                if key not in seen:
+                    seen.add(key)
+                    merged.append(r)
+                    if len(merged) >= k:
+                        break
+        if len(merged) >= k:
+            break
+    return {"status": "found", "results": merged} if merged else {"status": "no_match"}
