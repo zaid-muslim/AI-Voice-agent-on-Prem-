@@ -86,18 +86,47 @@
     cursor: pointer;
   }
   #sendBtn:hover { background: #22262f; }
+  #startOverlay {
+    text-align: center;
+    padding: 48px 16px;
+    border: 1px solid #2a2d34;
+    border-radius: 10px;
+    background: #15181f;
+    margin-bottom: 16px;
+  }
+  #startBtn {
+    padding: 14px 28px;
+    border-radius: 8px;
+    border: none;
+    background: #6ea8fe;
+    color: #0f1115;
+    font-size: 1.05rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  #startBtn:hover { background: #8bb9ff; }
+  #startHint {
+    margin-top: 12px;
+    color: #9aa0a6;
+    font-size: 0.9rem;
+  }
 </style>
 </head>
 <body>
   <h1>Voice Agent</h1>
   <div id="history"></div>
-  <div id="controls">
+  <div id="startOverlay">
+    <button id="startBtn">▶ Start Call</button>
+    <div id="startHint">Your browser requires a click before it will play audio — the agent
+      greets you right after you start.</div>
+  </div>
+  <div id="controls" style="display:none">
     <button id="micBtn">🎙</button>
     <button id="uploadBtn" type="button">📁 Upload audio</button>
     <input id="fileInput" type="file" accept="audio/*" style="display:none">
     <div id="status">Connecting…</div>
   </div>
-  <form id="textForm" autocomplete="off">
+  <form id="textForm" autocomplete="off" style="display:none">
     <input id="textInput" type="text" placeholder="Or type a message instead of speaking…">
     <button id="sendBtn" type="submit">Send</button>
   </form>
@@ -243,7 +272,25 @@ function connect() {
     }
   };
 }
-connect();
+const startOverlay = document.getElementById("startOverlay");
+const startBtn = document.getElementById("startBtn");
+const controlsEl = document.getElementById("controls");
+const textFormEl = document.getElementById("textForm");
+
+// The WebSocket (and so the server's auto-greeting, which fires the instant it connects) only
+// opens after this click. That's deliberate: browsers block audio playback until a genuine user
+// gesture has occurred, and the AudioContext must be created/resumed synchronously within that
+// gesture. Without this gate, the greeting's audio would get scheduled into a still-suspended
+// context before any click ever happens — it wouldn't play, then would surface late and
+// out of order once some later interaction finally unlocked the context.
+startBtn.addEventListener("click", () => {
+  const ctx = getAudioContext();
+  if (ctx.state === "suspended") ctx.resume().catch(() => {});
+  startOverlay.style.display = "none";
+  controlsEl.style.display = "flex";
+  textFormEl.style.display = "flex";
+  connect();
+});
 
 // Real-time mode: mic streams continuously once toggled on. The server runs VAD
 // on the raw PCM stream, segments utterances by speech/silence, and auto-interrupts
