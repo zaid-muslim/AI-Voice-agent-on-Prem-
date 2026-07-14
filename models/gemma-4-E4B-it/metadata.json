@@ -1,0 +1,7 @@
+{
+  "model_id": "google/gemma-4-E4B-it",
+  "local_path": "models/gemma-4-E4B-it",
+  "precision": "default",
+  "purpose": "voice agent brain",
+  "notes": "Saved locally for offline loading"
+}
