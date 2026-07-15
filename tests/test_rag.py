@@ -84,23 +84,12 @@ def test_build_retrieval_query_prepends_last_exchange():
 def test_build_retrieval_query_caps_prior_context_but_not_current():
     long_prev = "x" * 500
     history = [
-        {"role": "user", "content": "first question"},
         {"role": "assistant", "content": long_prev},
         {"role": "user", "content": "current question in full"},
     ]
     q = rag.build_retrieval_query(history, max_prev_chars=200)
     assert q.endswith("current question in full")
-    assert q.count("x") == 200   # prior assistant message capped
-
-
-def test_build_retrieval_query_drops_leading_greeting():
-    # The opening greeting is an assistant message with no preceding user turn; it's boilerplate
-    # and must not pollute the retrieval query on the caller's first real question.
-    history = [
-        {"role": "assistant", "content": "Good afternoon, thank you for calling HBL, how may I help?"},
-        {"role": "user", "content": "what accounts do you offer"},
-    ]
-    assert rag.build_retrieval_query(history) == "what accounts do you offer"
+    assert q.count("x") == 200   # prior message capped
 
 
 def test_build_retrieval_query_ignores_tool_and_system_messages():

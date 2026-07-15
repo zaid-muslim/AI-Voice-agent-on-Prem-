@@ -6,7 +6,6 @@ Run: python3 src/server.py
 
 import asyncio, base64, json, os, re, subprocess, time, uuid
 from datetime import datetime
-import aiohttp
 import numpy as np
 import webrtcvad
 import websockets
@@ -18,10 +17,11 @@ import db
 import rag
 
 # ── Config ────────────────────────────────────────────────────────────────────
-# LLM inference: vLLM's OpenAI-compatible server (replaces Ollama — needed for reliable tool
-# calling under load). Launched by run.sh via `vllm serve ... --served-model-name qwen2.5-14b-awq`.
-LLM_URL        = "http://localhost:8000/v1/chat/completions"
-LLM_MODEL      = "qwen2.5-14b-awq"
+# vLLM's OpenAI-compatible server (see run.sh) — replaced Ollama for inference speed.
+# Launched with: --served-model-name qwen2.5-14b-awq --enable-auto-tool-choice
+# --tool-call-parser hermes --gpu-memory-utilization 0.5 --max-model-len 8192
+VLLM_URL       = "http://localhost:8000/v1/chat/completions"
+VLLM_MODEL     = "qwen2.5-14b-awq"
 MAX_HISTORY_MESSAGES = 20   # ~10 exchanges of user+assistant turns, to bound context growth
 CHATTERBOX_URL = "http://localhost:8766/synthesize"  # separate venv/process, see chatterbox_server.py
 SEARXNG_URL    = "http://localhost:1234/search"       # SearXNG container: host port 1234 -> container 8080
@@ -29,11 +29,6 @@ WEB_SEARCH_RESULT_COUNT = 4
 MIN_TTS_CHARS  = 25   # sentences shorter than this ("Sure!") merge into the next one
 RAG_INJECT_TOP_K = 4  # max business-doc chunks injected into context per turn (always-on retrieval)
 WS_PORT        = 8765
-
-# Single shared HTTP client session for the process lifetime (vLLM, SearXNG, Chatterbox all run
-# on localhost and are hit multiple times per turn) — avoids the connector/handshake setup cost of
-# a fresh aiohttp.ClientSession per call. Created in main() once the event loop is running.
-HTTP_SESSION: aiohttp.ClientSession | None = None
 
 # Anchor data/config paths to the project root (parent of src/) so they resolve
 # no matter what directory the process is launched from.
@@ -306,14 +301,6 @@ def build_system_prompt() -> str:
         "material — only use what is specifically about the thing the caller asked about. Answer in "
         "your own words; never read out a document name, section heading, or source label — those are "
         "for your reference only. "
-        "Voice transcription of what the caller says is never perfect, especially over a faint mic or "
-        "noisy line, and can turn one real word into a completely different, unrelated one. If the "
-        "caller's question contains a word or phrase that doesn't make sense, isn't a real term you "
-        "recognize, or seems out of place in an otherwise clear sentence, do NOT guess at what they "
-        "meant and do NOT invent an explanation for it as if it were a real document, product, or term "
-        "— treating a mishearing as real and confidently answering about it is a serious error. Instead, "
-        "say you didn't quite catch that part and ask them to repeat or rephrase it, with no hesitation "
-        "or apology needed — this happens naturally over a phone line. "
         "You also have a remember tool for long-term memory. Call it whenever the caller shares a "
         "durable fact worth keeping for next time — their name, or something they explicitly ask you "
         "to remember. Don't announce that you're saving it, and don't save trivia or one-off details. "
@@ -389,88 +376,85 @@ def transcribe_upload(audio_bytes: bytes) -> str:
 # ── LLM ───────────────────────────────────────────────────────────────────────
 async def stream_llm(messages: list, tools: list | None = None):
     """Async generator yielding ('content', text) or ('tool_calls', [...]) events from vLLM's
-    OpenAI-compatible /v1/chat/completions streaming API (SSE: `data: {...}` lines, terminated
-    by a literal `data: [DONE]`).
+    OpenAI-compatible streaming /v1/chat/completions API.
 
-    Unlike Ollama's /api/chat (which handed back each tool call as one complete object), OpenAI-
-    style streaming fragments each tool call across many chunks — the name may arrive in one
-    delta and the JSON `arguments` string arrives character-by-character/token-by-token across
-    several more, all correlated only by a per-call `index`. We accumulate those fragments here
-    and only yield the assembled tool_calls once finish_reason confirms the call is complete.
-    `arguments` is left as the raw JSON *string* the API gives us (not parsed) — that's the shape
-    OpenAI-compatible APIs expect back when this turn's assistant message is replayed in a later
-    request, so callers must json.loads() it themselves before reading individual fields."""
+    Wire-format note: unlike Ollama (which sent one complete, already-parsed tool_calls list in
+    a single chunk), OpenAI-style streaming fragments each tool call across many chunks — the
+    arguments arrive as partial JSON *string* pieces (`delta.tool_calls[i].function.arguments`)
+    that must be concatenated by index and json.loads()'d only once the stream ends. This
+    function absorbs that difference internally so it still yields exactly one ('tool_calls', [...])
+    event, in the same {"id", "function": {"name", "arguments": <dict>}} shape Ollama produced —
+    nothing downstream (speak_stream, respond_to_transcript's dispatch loop) needs to change."""
+    import aiohttp
     payload = {
-        "model": LLM_MODEL,
+        "model": VLLM_MODEL,
         "messages": [{"role": "system", "content": build_system_prompt()}] + messages,
         "stream": True,
     }
     if tools:
         payload["tools"] = tools
-    tool_calls_acc = {}   # call index -> {"id", "name", "arguments"}, assembled across chunks
-    async with HTTP_SESSION.post(LLM_URL, json=payload) as resp:
-        resp.raise_for_status()
-        async for raw_line in resp.content:
-            line = raw_line.strip()
-            if not line or not line.startswith(b"data:"):
-                continue
-            chunk = line[len(b"data:"):].strip()
-            if chunk == b"[DONE]":
-                break
-            data = json.loads(chunk)
-            choices = data.get("choices") or [{}]
-            choice = choices[0]
-            delta = choice.get("delta", {})
 
-            content = delta.get("content")
-            if content:
-                yield ("content", content)
+    tool_call_acc: dict[int, dict] = {}   # index -> {"id", "name", "arguments": "<partial json>"}
 
-            for tc in delta.get("tool_calls") or []:
-                idx = tc.get("index", 0)
-                entry = tool_calls_acc.setdefault(idx, {"id": "", "name": "", "arguments": ""})
-                if tc.get("id"):
-                    entry["id"] = tc["id"]
-                fn = tc.get("function") or {}
-                if fn.get("name"):
-                    entry["name"] = fn["name"]
-                if fn.get("arguments"):
-                    entry["arguments"] += fn["arguments"]
+    async with aiohttp.ClientSession() as session:
+        async with session.post(VLLM_URL, json=payload) as resp:
+            resp.raise_for_status()
+            async for raw_line in resp.content:
+                line = raw_line.strip()
+                if not line.startswith(b"data:"):
+                    continue
+                chunk = line[len(b"data:"):].strip()
+                if chunk == b"[DONE]":
+                    break
+                data = json.loads(chunk)
+                choices = data.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta", {})
 
-            if choice.get("finish_reason") == "tool_calls" and tool_calls_acc:
-                yield ("tool_calls", [
-                    {
-                        "id": v["id"],
-                        "type": "function",
-                        "function": {"name": v["name"], "arguments": v["arguments"]},
-                    }
-                    for v in tool_calls_acc.values()
-                ])
+                content = delta.get("content")
+                if content:
+                    yield ("content", content)
 
+                for tc in delta.get("tool_calls") or []:
+                    idx = tc.get("index", 0)
+                    slot = tool_call_acc.setdefault(idx, {"id": None, "name": None, "arguments": ""})
+                    if tc.get("id"):
+                        slot["id"] = tc["id"]
+                    fn = tc.get("function") or {}
+                    if fn.get("name"):
+                        slot["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        slot["arguments"] += fn["arguments"]
 
-def _parse_tool_arguments(raw_arguments) -> dict:
-    """A tool call's `function.arguments` arrives as a JSON-encoded string (OpenAI-compatible
-    API convention) — parse it defensively so a malformed/empty string never crashes a turn."""
-    if isinstance(raw_arguments, dict):
-        return raw_arguments
-    try:
-        parsed = json.loads(raw_arguments or "{}")
-    except json.JSONDecodeError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+    if tool_call_acc:
+        tool_calls = []
+        for idx in sorted(tool_call_acc):
+            slot = tool_call_acc[idx]
+            try:
+                args = json.loads(slot["arguments"]) if slot["arguments"] else {}
+            except json.JSONDecodeError:
+                args = {}
+            tool_calls.append({
+                "id": slot["id"] or f"call_{idx}",
+                "function": {"name": slot["name"], "arguments": args},
+            })
+        yield ("tool_calls", tool_calls)
 
 
 # ── Web Search ────────────────────────────────────────────────────────────────
 async def web_search(query: str) -> str:
     """Query the local SearXNG instance and return a compact text block of results."""
+    import aiohttp
     try:
-        async with HTTP_SESSION.get(
-            SEARXNG_URL,
-            params={"q": query, "format": "json"},
-            timeout=aiohttp.ClientTimeout(total=10),
-        ) as resp:
-            resp.raise_for_status()
-            data = await resp.json(content_type=None)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                SEARXNG_URL,
+                params={"q": query, "format": "json"},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                resp.raise_for_status()
+                data = await resp.json(content_type=None)
     except Exception as e:
         return f"Web search failed: {e}"
 
@@ -488,22 +472,17 @@ async def web_search(query: str) -> str:
 
 # ── TTS ───────────────────────────────────────────────────────────────────────
 BRACKET_TAG = re.compile(r'\s*\[[^\]]*\]\s*')
-EXCLAMATION = re.compile(r'!+')
 
 async def synthesize_to_wav_b64(text: str) -> str:
     """Synthesize one sentence via the Chatterbox Turbo microservice → base64 WAV."""
+    import aiohttp
     text = BRACKET_TAG.sub(" ", text).strip()   # never speak stray [tags] aloud
-    # This TTS model reads "!" with a long trained-in pause afterward — fine for a genuinely
-    # excited exclamation, but jarring on filler acknowledgements like "Sure!"/"Certainly!",
-    # where it reads as a dead stop and makes the caller think the reply is already over.
-    # Swap for a comma (a short, natural pause) purely for what gets spoken — the displayed
-    # text and conversation history keep the "!" exactly as the model wrote it.
-    text = EXCLAMATION.sub(",", text)
     if not text:
         return ""
-    async with HTTP_SESSION.post(CHATTERBOX_URL, json={"text": text}) as resp:
-        resp.raise_for_status()
-        wav_bytes = await resp.read()
+    async with aiohttp.ClientSession() as session:
+        async with session.post(CHATTERBOX_URL, json={"text": text}) as resp:
+            resp.raise_for_status()
+            wav_bytes = await resp.read()
     return base64.b64encode(wav_bytes).decode()
 
 
@@ -544,13 +523,8 @@ SENTENCE_END = re.compile(r'(?<=[.!?])\s+')
 # For the very first chunk of a reply, break at the earliest clause boundary too
 # (comma/semicolon/colon), so audio starts after a few words instead of waiting for
 # the model to finish a whole first sentence — the biggest source of start latency.
-# Benchmarked against real vLLM streams + live Chatterbox synthesis before lowering this from 15:
-# short natural lead-ins ("Sure,") only clear a 5-char floor, not 15, and synthesize meaningfully
-# faster too (~0.28s at 5 chars vs ~0.5-0.7s at 27-46 chars) — worth capturing since the model's
-# own punctuation pacing (not this constant) is the real limiter whenever its first clause is
-# already long. 5 is the floor actually observed in real replies; no evidence a lower value helps.
 FIRST_CHUNK_END = re.compile(r'(?<=[.!?,;:])\s+')
-FIRST_CHUNK_MIN_CHARS = 5
+FIRST_CHUNK_MIN_CHARS = 15
 
 def split_sentences(buffer: str) -> tuple[list[str], str]:
     """
@@ -807,7 +781,7 @@ async def respond_to_transcript(ws, transcript: str, history: list, session: dic
             for call in tool_calls:
                 fn = call.get("function", {})
                 name = fn.get("name")
-                args = _parse_tool_arguments(fn.get("arguments"))
+                args = fn.get("arguments") or {}
                 if name == "web_search":
                     query = args.get("query", "").strip()
                     print(f"  Web search: {query}")
@@ -1056,11 +1030,9 @@ async def handle_client(ws):
 
 # ── Entry Point ───────────────────────────────────────────────────────────────
 async def main():
-    global HTTP_SESSION
-    async with aiohttp.ClientSession() as HTTP_SESSION:
-        async with websockets.serve(handle_client, "0.0.0.0", WS_PORT):
-            print(f"Voice agent listening on ws://0.0.0.0:{WS_PORT}")
-            await asyncio.Future()   # run forever
+    async with websockets.serve(handle_client, "0.0.0.0", WS_PORT):
+        print(f"Voice agent listening on ws://0.0.0.0:{WS_PORT}")
+        await asyncio.Future()   # run forever
 
 if __name__ == "__main__":
     print("Loading STT model...")

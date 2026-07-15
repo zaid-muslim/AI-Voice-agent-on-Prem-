@@ -6,6 +6,14 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 MINICONDA_PY="/home/nauyan/miniconda3/bin/python3"
+VLLM_BIN="/home/nauyan/miniconda3/bin/vllm"
+VLLM_MODEL="Qwen/Qwen2.5-14B-Instruct-AWQ"
+VLLM_SERVED_NAME="qwen2.5-14b-awq"   # must match VLLM_MODEL in src/server.py
+VLLM_PORT=8000
+VLLM_LOG="logs/vllm.log"
+# gpu_memory_utilization=0.5 and max_model_len=8192 keep vLLM's footprint bounded so it shares
+# the one GPU safely with Whisper (in src/server.py) and Chatterbox below — same conservative
+# budgeting precedent as gen_reference.py's BudgetedOrpheusModel for this box.
 CHATTERBOX_PY=".chatterbox-venv/bin/python3"
 CHATTERBOX_LOG="logs/chatterbox.log"
 WEB_DIR="web"
@@ -23,9 +31,6 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-if ! curl -s -o /dev/null http://localhost:11434/api/tags; then
-    echo "Warning: Ollama doesn't seem to be reachable on localhost:11434 — start it with 'ollama serve'."
-fi
 if ! curl -s -o /dev/null "http://localhost:1234/search?q=test&format=json"; then
     echo "Warning: SearXNG doesn't seem to be reachable on localhost:1234 — web search will fail until it's up."
 fi
@@ -44,13 +49,33 @@ if [ ! -f "$RAG_INDEX" ]; then
     fi
 fi
 
+echo "Starting vLLM (LLM inference, replaces Ollama)..."
+"$VLLM_BIN" serve "$VLLM_MODEL" \
+    --served-model-name "$VLLM_SERVED_NAME" \
+    --enable-auto-tool-choice --tool-call-parser hermes \
+    --gpu-memory-utilization 0.5 --max-model-len 8192 \
+    --port "$VLLM_PORT" > "$VLLM_LOG" 2>&1 &
+vllm_pid=$!
+pids+=("$vllm_pid")
+
+echo "Waiting for vLLM to be ready (model load can take 30-90s)..."
+until curl -s -o /dev/null "http://localhost:$VLLM_PORT/v1/models"; do
+    if ! kill -0 "$vllm_pid" 2>/dev/null; then
+        echo "vLLM failed to start — see $VLLM_LOG"
+        exit 1
+    fi
+    sleep 2
+done
+echo "vLLM ready."
+
 echo "Starting Chatterbox Turbo TTS service..."
 "$CHATTERBOX_PY" -u src/chatterbox_server.py > "$CHATTERBOX_LOG" 2>&1 &
-pids+=($!)
+chatterbox_pid=$!
+pids+=("$chatterbox_pid")
 
 echo "Waiting for Chatterbox to be ready (this can take ~10-60s)..."
 until grep -q "Chatterbox Turbo ready" "$CHATTERBOX_LOG" 2>/dev/null; do
-    if ! kill -0 "${pids[0]}" 2>/dev/null; then
+    if ! kill -0 "$chatterbox_pid" 2>/dev/null; then
         echo "Chatterbox failed to start — see $CHATTERBOX_LOG"
         exit 1
     fi

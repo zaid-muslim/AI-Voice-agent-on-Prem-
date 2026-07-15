@@ -10,7 +10,6 @@ logs/
 *.log
 
 Plans/
-*.md
 
 # Runtime state (per-deployment caller data — regenerate the DB with src/seed_db.py)
 data/memory.json

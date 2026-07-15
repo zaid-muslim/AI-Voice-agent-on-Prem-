@@ -50,7 +50,7 @@ run.sh     Launches the whole pipeline
 | Stage | Model | Parameters | Precision / Quantization | Runs on |
 |-------|-------|------------|---------------------------|---------|
 | STT | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) `large-v3` | ~1.55B | INT8 (`int8_float16` compute type) | GPU |
-| LLM | Qwen2.5 14B (via Ollama) | 14.8B | Q4_K_M (4-bit) | GPU |
+| LLM | Qwen2.5 14B Instruct (via vLLM) | 14.8B | AWQ (4-bit) | GPU |
 | TTS | [Chatterbox Turbo](https://github.com/resemble-ai/chatterbox) | ~0.5B backbone (T3) + S3Gen vocoder | Voice-cloned from a reference clip | GPU |
 
 ## Features
@@ -64,7 +64,7 @@ run.sh     Launches the whole pipeline
   again (even mid-response), it immediately cancels whatever the agent is doing (LLM +
   TTS) and starts processing your new utterance. No button press needed.
 - **Conversation memory** — history persists per browser session (last ~10 exchanges) via
-  Ollama's `/api/chat`.
+  vLLM's OpenAI-compatible `/v1/chat/completions` endpoint.
 - **Long-term memory** — durable facts about the caller (name, or anything explicitly asked
   to be remembered) survive across sessions via a `remember` tool, stored in `data/memory.json`
   and injected into the system prompt every turn. Delete `data/memory.json` to wipe it.
@@ -98,7 +98,7 @@ run.sh     Launches the whole pipeline
   deciding to look something up, and it answers in a single LLM pass. The retrieval query is
   context-aware (raw utterance + last exchange, hybrid-merged) so pronoun follow-ups ("what's the
   eligibility for *it*?") resolve to the right document. Runs entirely on CPU (fastembed,
-  `BAAI/bge-small-en-v1.5`, ONNX INT8) — no GPU/VRAM contention with Whisper/Ollama/Chatterbox —
+  `BAAI/bge-small-en-v1.5`, ONNX INT8) — no GPU/VRAM contention with Whisper/vLLM/Chatterbox —
   over a flat NumPy cosine-similarity index built from Markdown docs in `config/rag_docs/` by
   `src/build_index.py`. When nothing clears the similarity threshold, no context is injected and the
   prompt directs the agent to say it doesn't have that on file rather than guess. Document/section
@@ -113,8 +113,8 @@ run.sh     Launches the whole pipeline
 
 ## Usage
 
-**Prerequisites:** Ollama running, and the SearXNG docker container up (`docker start <container>`,
-listening on host port 1234).
+**Prerequisites:** the SearXNG docker container up (`docker start <container>`, listening on host
+port 1234). vLLM itself is started by `run.sh` — no separate service to launch by hand.
 
 **One-time setup:** seed the customer database used for card-block verification:
 ```bash
@@ -140,7 +140,7 @@ This starts Chatterbox, the file server, and the main server together, and stops
 cleanly on `Ctrl+C`.
 
 **Manual steps** (equivalent to the above):
-1. Start Ollama: `ollama serve`
+1. Start vLLM: `vllm serve Qwen/Qwen2.5-14B-Instruct-AWQ --served-model-name qwen2.5-14b-awq --enable-auto-tool-choice --tool-call-parser hermes --gpu-memory-utilization 0.5 --max-model-len 8192 --port 8000`
 2. Start the Chatterbox TTS service: `.chatterbox-venv/bin/python3 src/chatterbox_server.py`
 3. Start the main server: `python3 src/server.py`
 4. Serve the UI: `python3 -m http.server 3000 --directory web`
