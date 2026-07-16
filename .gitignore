@@ -1,0 +1,4 @@
+plans/
+.env
+.venv/
+.chatterbox-venv/

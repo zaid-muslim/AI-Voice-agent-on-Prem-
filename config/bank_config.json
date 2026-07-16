@@ -1,0 +1,57 @@
+{
+  "bank_name": "HBL (Habib Bank Limited)",
+  "tagline": "Pakistan's largest bank by assets",
+  "customer_care_number": "111-111-425",
+  "website": "www.hbl.com",
+  "general_hours": {
+    "monday_to_thursday": "9:00 AM to 5:00 PM",
+    "friday": "9:00 AM to 6:00 PM, with a lunch/prayer break from 1:00 PM to 2:30 PM",
+    "saturday": "9:00 AM to 1:30 PM at selected branches only",
+    "sunday": "Closed",
+    "note": "Some branches offer extended hours until 7:00 PM on weekdays. During Ramadan, hours are typically 8:00 AM to 1:45 PM Monday to Thursday, and 8:00 AM to 12:30 PM on Friday. Exact hours can vary by branch."
+  },
+  "branches": [
+    {
+      "name": "Islamabad Corporate Centre",
+      "address": "HBL Tower, Jinnah Avenue, Blue Area, Islamabad",
+      "phone": "(051) 2872203"
+    },
+    {
+      "name": "F-10 Markaz Branch",
+      "address": "Unit 7, Plot 7-A, F-10 Markaz, Islamabad",
+      "phone": null
+    },
+    {
+      "name": "F-8 Markaz Branch",
+      "address": "8-C, Shawaiz Center, F-8 Markaz, Islamabad",
+      "phone": null
+    },
+    {
+      "name": "Head Office",
+      "address": "HBL Tower, Plot No. G-4, KDA Scheme 5, Block 7, Clifton, Karachi",
+      "phone": "(021) 33116030"
+    }
+  ],
+  "services": [
+    {
+      "name": "Savings Accounts",
+      "description": "HBL PLS Savings Account, which pays profit semi-annually with no minimum balance requirement, and the HBL Value Account for higher returns."
+    },
+    {
+      "name": "Current Accounts",
+      "description": "HBL Conventional Current Account for unlimited transactions, HBL Basic Banking Account for simple everyday needs, and the HBL Asaan Account with simplified opening requirements."
+    },
+    {
+      "name": "Credit Cards",
+      "description": "HBL CreditCard with a rewards program that doesn't expire, plus specialized cards like the HBL FuelSaver CreditCard."
+    },
+    {
+      "name": "Personal Loans",
+      "description": "HBL Personal Loan, offering up to PKR 3 Million for things like medical bills, education, weddings, or home repairs, subject to eligibility."
+    },
+    {
+      "name": "Digital Banking",
+      "description": "The HBL Mobile app and Internet Banking for transfers, bill payments, and account management from home."
+    }
+  ]
+}
