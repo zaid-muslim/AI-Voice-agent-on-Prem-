@@ -1,0 +1,434 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Riverside General — Front Desk</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+/* ------------------------------------------------------------------------
+   RIVERSIDE GENERAL — reception console
+   Design language: hospital wayfinding. Department color strips (like
+   corridor floor lines) are the signature element; the transcript is an
+   operator's call log in mono. Everything else stays quiet.
+--------------------------------------------------------------------------*/
+:root{
+  --paper:#F4F6F5;
+  --card:#FFFFFF;
+  --ink:#17232B;
+  --ink-soft:#5A6B76;
+  --line:#DDE4E3;
+  --desk:#2E5E8C;          /* agent / status accent */
+  --cardio:#C0392F;        /* wayfinding: cardiology */
+  --peds:#D9930D;          /* wayfinding: pediatrics */
+  --genmed:#1F7A5C;        /* wayfinding: general medicine */
+  --alert-bg:#FBEBE9;
+  --radius:10px;
+  --mono:'IBM Plex Mono',ui-monospace,monospace;
+  --sans:'Archivo',system-ui,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  font-family:var(--sans);color:var(--ink);background:var(--paper);
+  -webkit-font-smoothing:antialiased;
+}
+/* ---- header: name + the wayfinding strip -------------------------------*/
+header{background:var(--card);border-bottom:1px solid var(--line)}
+.strip{display:flex;height:6px}
+.strip span{flex:1}
+.strip .s-cardio{background:var(--cardio)}
+.strip .s-genmed{background:var(--genmed)}
+.strip .s-peds{background:var(--peds)}
+.strip .s-desk{background:var(--desk)}
+.masthead{
+  max-width:1100px;margin:0 auto;padding:20px 24px 16px;
+  display:flex;align-items:baseline;justify-content:space-between;gap:16px;flex-wrap:wrap;
+}
+.masthead h1{font-weight:800;font-size:clamp(20px,3vw,28px);letter-spacing:-.02em}
+.masthead h1 small{display:block;font-weight:500;font-size:12px;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--ink-soft);margin-top:2px}
+.env-note{font-family:var(--mono);font-size:11px;color:var(--ink-soft)}
+/* ---- layout -------------------------------------------------------------*/
+main{max-width:1100px;margin:0 auto;padding:24px;display:grid;gap:24px;
+  grid-template-columns:minmax(320px,5fr) minmax(320px,6fr)}
+@media (max-width:820px){main{grid-template-columns:1fr}}
+section h2{
+  font-size:12px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--ink-soft);margin-bottom:12px;
+}
+/* ---- emergency banner ----------------------------------------------------*/
+#emergency{
+  display:none;grid-column:1/-1;background:var(--alert-bg);
+  border:1px solid var(--cardio);border-left:6px solid var(--cardio);
+  border-radius:var(--radius);padding:14px 18px;
+}
+#emergency.show{display:block}
+#emergency strong{color:var(--cardio);font-size:13px;letter-spacing:.1em;text-transform:uppercase}
+#emergency p{margin-top:6px;font-size:15px;line-height:1.45}
+/* ---- call console ---------------------------------------------------------*/
+.console{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+  padding:20px;display:flex;flex-direction:column;min-height:520px}
+.call-row{display:flex;align-items:center;gap:16px;margin-bottom:16px}
+#callBtn{
+  appearance:none;border:0;cursor:pointer;font:inherit;
+  background:var(--desk);color:#fff;font-weight:700;font-size:15px;
+  padding:14px 22px;border-radius:999px;display:flex;align-items:center;gap:10px;
+  transition:background .15s;
+}
+#callBtn:hover{background:#264F77}
+#callBtn:focus-visible{outline:3px solid var(--desk);outline-offset:3px}
+#callBtn.on{background:var(--cardio)}
+#callBtn .dot{width:10px;height:10px;border-radius:50%;background:#fff;position:relative}
+#callBtn.on .dot::after{
+  content:"";position:absolute;inset:-6px;border-radius:50%;
+  border:2px solid rgba(255,255,255,.7);animation:pulse 1.6s ease-out infinite;
+}
+@keyframes pulse{from{transform:scale(.6);opacity:1}to{transform:scale(1.5);opacity:0}}
+@media (prefers-reduced-motion:reduce){
+  #callBtn.on .dot::after{animation:none}
+  .chip{animation:none !important}
+}
+#status{font-family:var(--mono);font-size:12px;color:var(--ink-soft)}
+#status b{color:var(--desk);font-weight:500}
+/* ---- transcript: operator call log ---------------------------------------*/
+#log{
+  flex:1;overflow-y:auto;background:#FBFCFC;border:1px solid var(--line);
+  border-radius:8px;padding:14px;font-family:var(--mono);font-size:13px;
+  line-height:1.6;
+}
+#log .hint{color:var(--ink-soft)}
+.turn{margin-bottom:10px;white-space:pre-wrap;word-break:break-word}
+.turn .who{font-weight:500;letter-spacing:.06em}
+.turn.caller .who{color:var(--genmed)}
+.turn.desk   .who{color:var(--desk)}
+.turn.system .who{color:var(--cardio)}
+.turn.pending{opacity:.55}
+/* ---- directory board -------------------------------------------------------*/
+.board{display:flex;flex-direction:column;gap:24px}
+.dept{margin-bottom:4px}
+.dept-head{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.dept-head .mark{width:22px;height:6px;border-radius:3px}
+.dept-head h3{font-size:15px;font-weight:700;letter-spacing:-.01em}
+.dept-head .count{font-family:var(--mono);font-size:11px;color:var(--ink-soft)}
+.doc{
+  background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+  padding:14px 16px 14px 20px;margin-bottom:10px;position:relative;cursor:pointer;
+  transition:border-color .15s;
+}
+.doc::before{ /* the wayfinding strip */
+  content:"";position:absolute;left:0;top:0;bottom:0;width:6px;
+  border-radius:var(--radius) 0 0 var(--radius);background:var(--dept-color,var(--desk));
+}
+.doc:hover,.doc:focus-visible{border-color:var(--dept-color,var(--desk));outline:none}
+.doc h4{font-size:15px;font-weight:700}
+.doc p{font-size:13px;color:var(--ink-soft);margin-top:4px;line-height:1.45}
+.doc .ask{
+  margin-top:8px;font-family:var(--mono);font-size:11px;color:var(--dept-color,var(--desk));
+}
+.doc.busy{border-color:var(--dept-color)}
+/* ---- live availability -----------------------------------------------------*/
+#availability .card{
+  background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+  padding:14px 16px;margin-bottom:10px;
+}
+#availability .card h4{font-size:14px;font-weight:700}
+#availability .card .meta{font-family:var(--mono);font-size:11px;color:var(--ink-soft);margin-top:2px}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.chip{
+  font-family:var(--mono);font-size:12px;padding:6px 12px;border-radius:999px;
+  border:1px solid var(--line);background:#FBFCFC;
+  animation:chipin .25s ease-out both;
+}
+.chip.booked{background:var(--genmed);border-color:var(--genmed);color:#fff}
+@keyframes chipin{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+#availability .empty{
+  border:1px dashed var(--line);border-radius:var(--radius);padding:18px;
+  font-size:13px;color:var(--ink-soft);
+}
+footer{max-width:1100px;margin:0 auto;padding:8px 24px 28px;
+  font-family:var(--mono);font-size:11px;color:var(--ink-soft)}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="strip" aria-hidden="true">
+    <span class="s-cardio"></span><span class="s-genmed"></span>
+    <span class="s-peds"></span><span class="s-desk"></span>
+  </div>
+  <div class="masthead">
+    <h1>Riverside General<small>Front desk · voice reception</small></h1>
+    <div class="env-note" id="envNote">local demo · self-hosted LiveKit</div>
+  </div>
+</header>
+
+<main>
+  <div id="emergency" role="alert">
+    <strong>Emergency protocol engaged</strong>
+    <p id="emergencyMsg"></p>
+  </div>
+
+  <!-- LEFT: the call console -->
+  <section class="console" aria-label="Call console">
+    <h2>Call console</h2>
+    <div class="call-row">
+      <button id="callBtn"><span class="dot" aria-hidden="true"></span><span id="callLabel">Call the front desk</span></button>
+      <div id="status">line idle</div>
+    </div>
+    <div id="log" aria-live="polite">
+      <div class="hint">Call log appears here. Try: "I'd like to book a heart
+checkup with cardiology tomorrow morning." Then watch the board on the
+right update as the desk checks the schedule.</div>
+    </div>
+  </section>
+
+  <!-- RIGHT: directory + live availability -->
+  <div class="board">
+    <section aria-label="Doctor directory">
+      <h2>Directory</h2>
+      <div id="directory"></div>
+    </section>
+    <section id="availability" aria-label="Live availability">
+      <h2>Live availability</h2>
+      <div class="empty" id="availEmpty">When the desk checks the schedule
+        during your call, open slots appear here in real time.</div>
+      <div id="availCards"></div>
+    </section>
+  </div>
+</main>
+
+<footer>agent: whisper → safety gate → gemma 4 (vLLM) → qwen tts · transport: livekit · emergencies bypass the model entirely</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
+<script>
+"use strict";
+/* =========================================================================
+   Reception console client.
+   - /api/token -> connect to livekit-server -> publish mic, play agent audio
+   - data topic "hospital.ui" -> roster / availability / booking / emergency
+   - transcriptions -> operator call log (new text-stream API, with a
+     fallback to the older TranscriptionReceived event)
+   ========================================================================= */
+const LK = window.LivekitClient;
+const $ = (id) => document.getElementById(id);
+
+// Real booking.py returns lowercase department names ("cardiology"),
+// hospital_kb's roster returns Title Case - look up case-insensitively.
+const DEPT_COLORS = {
+  "cardiology": "var(--cardio)",
+  "general medicine": "var(--genmed)",
+  "pediatrics": "var(--peds)",
+};
+const deptColor = (name) => DEPT_COLORS[(name || "").toLowerCase()] || "var(--desk)";
+
+let room = null;
+let connected = false;
+const segments = new Map(); // segment id -> log element (for interim updates)
+
+/* ------------------------------------------------------------- call log */
+function logTurn(who, text, cls, id, pending) {
+  const log = $("log");
+  let el = id ? segments.get(id) : null;
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "turn " + cls;
+    el.innerHTML = `<span class="who"></span> <span class="txt"></span>`;
+    el.querySelector(".who").textContent = "[" + who + "]";
+    log.appendChild(el);
+    if (id) segments.set(id, el);
+  }
+  el.querySelector(".txt").textContent = text;
+  el.classList.toggle("pending", !!pending);
+  log.scrollTop = log.scrollHeight;
+}
+
+function setStatus(html) { $("status").innerHTML = html; }
+
+/* ------------------------------------------------------------ directory */
+function renderRoster(doctors) {
+  const byDept = {};
+  for (const d of doctors) (byDept[d.department] ??= []).push(d);
+  const root = $("directory");
+  root.innerHTML = "";
+  for (const [dept, docs] of Object.entries(byDept)) {
+    const wrap = document.createElement("div");
+    wrap.className = "dept";
+    const color = deptColor(dept);
+    wrap.innerHTML = `
+      <div class="dept-head">
+        <span class="mark" style="background:${color}"></span>
+        <h3>${dept}</h3>
+        <span class="count">${docs.length} doctor${docs.length > 1 ? "s" : ""}</span>
+      </div>`;
+    for (const doc of docs) {
+      const card = document.createElement("div");
+      card.className = "doc";
+      card.tabIndex = 0;
+      card.dataset.doctor = doc.name;
+      card.style.setProperty("--dept-color", color);
+      card.innerHTML = `
+        <h4>${doc.name}</h4>
+        <p>${doc.bio || ""}</p>
+        <div class="ask">say: "book me with ${doc.name}"</div>`;
+      wrap.appendChild(card);
+    }
+    root.appendChild(wrap);
+  }
+}
+// Static fallback so the board is never blank before the agent joins.
+renderRoster([
+  {name:"Dr. Imran Malik", department:"Cardiology", bio:"Consultant cardiologist. Preventive cardiology and hypertension."},
+  {name:"Dr. Ayesha Siddiqui", department:"Cardiology", bio:"Interventional cardiologist. Arrhythmia and pacemaker clinic."},
+  {name:"Dr. Bilal Ahmed", department:"General Medicine", bio:"General physician. Diabetes management and annual checkups."},
+  {name:"Dr. Sana Farooqi", department:"Pediatrics", bio:"Pediatrician. Newborn care, vaccinations, childhood asthma."},
+]);
+
+/* --------------------------------------------------------- availability */
+function renderAvailability(payload) {
+  $("availEmpty").style.display = "none";
+  const root = $("availCards");
+  const groups = [...(payload.slots || []), ...(payload.alternatives || [])];
+  const isAlt = (i) => i >= (payload.slots || []).length;
+  groups.forEach((slot, gi) => {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `
+      <h4>${slot.doctor}</h4>
+      <div class="meta">${payload.department || ""} · ${slot.date || payload.date || ""}${isAlt(gi) ? " · alternative" : ""}</div>
+      <div class="chips"></div>`;
+    const chips = card.querySelector(".chips");
+    for (const t of slot.times || []) {
+      const chip = document.createElement("span");
+      chip.className = "chip";
+      chip.textContent = t;
+      chips.appendChild(chip);
+    }
+    if (!(slot.times || []).length) {
+      const chip = document.createElement("span");
+      chip.className = "chip";
+      chip.textContent = "no open slots";
+      chips.appendChild(chip);
+    }
+    root.prepend(card);
+    const doc = document.querySelector(`.doc[data-doctor="${slot.doctor}"]`);
+    if (doc) doc.classList.add("busy");
+  });
+}
+
+function renderBooking(bk) {
+  $("availEmpty").style.display = "none";
+  const card = document.createElement("div");
+  card.className = "card";
+  card.innerHTML = `
+    <h4>Booked — ${bk.doctor || bk.department || ""}</h4>
+    <div class="meta">${bk.patient_name || bk.patient || ""} · ${bk.date || ""}${bk.booking_id ? " · code " + bk.booking_id : ""}</div>
+    <div class="chips"><span class="chip booked">${bk.time || ""} confirmed</span></div>`;
+  $("availCards").prepend(card);
+  logTurn("SYSTEM", `booking confirmed: ${bk.patient_name || bk.patient} → ${bk.doctor}, ${bk.date} ${bk.time}`, "system");
+}
+
+/* ------------------------------------------------------------- UI events */
+function onUiData(payload) {
+  try {
+    const msg = JSON.parse(new TextDecoder().decode(payload));
+    if (msg.type === "roster") renderRoster(msg.doctors || []);
+    else if (msg.type === "availability") renderAvailability(msg);
+    else if (msg.type === "booking") renderBooking(msg.booking || {});
+    else if (msg.type === "cancellation")
+      logTurn("SYSTEM", `appointment cancelled: ${msg.booking?.patient_name || msg.booking?.patient} (${msg.booking?.date} ${msg.booking?.time})`, "system");
+    else if (msg.type === "emergency") {
+      $("emergency").classList.add("show");
+      $("emergencyMsg").textContent = msg.message || "Call 1122 immediately.";
+      logTurn("SYSTEM", "SAFETY GATE fired — LLM bypassed, escalation spoken directly", "system");
+    } else if (msg.type === "status" && msg.state === "listening")
+      setStatus(`line open · <b>desk is listening</b>`);
+  } catch (e) { console.warn("bad ui payload", e); }
+}
+
+/* ---------------------------------------------------------- transcription */
+function wireTranscriptions(rm) {
+  // Newer SDKs: transcriptions arrive as text streams on this topic.
+  try {
+    rm.registerTextStreamHandler("lk.transcription", async (reader, participant) => {
+      const isAgent = participant?.identity !== rm.localParticipant.identity;
+      const id = reader.info?.id || Math.random().toString(36).slice(2);
+      let text = "";
+      for await (const chunk of reader) {
+        text += chunk;
+        logTurn(isAgent ? "DESK" : "CALLER", text, isAgent ? "desk" : "caller", id, true);
+      }
+      logTurn(isAgent ? "DESK" : "CALLER", text, isAgent ? "desk" : "caller", id, false);
+    });
+  } catch (e) { console.info("text-stream transcription API unavailable, using event fallback"); }
+
+  // Older SDKs: TranscriptionReceived event with segment objects.
+  rm.on(LK.RoomEvent.TranscriptionReceived, (segs, participant) => {
+    const isAgent = participant?.identity !== rm.localParticipant.identity;
+    for (const s of segs || []) {
+      logTurn(isAgent ? "DESK" : "CALLER", s.text,
+              isAgent ? "desk" : "caller", s.id, !s.final);
+    }
+  });
+}
+
+/* ---------------------------------------------------------------- connect */
+async function connect() {
+  setStatus("requesting line…");
+  const res = await fetch("/api/token");
+  const { token, url, room: roomName } = await res.json();
+
+  room = new LK.Room({ adaptiveStream: true });
+  wireTranscriptions(room);
+
+  room.on(LK.RoomEvent.TrackSubscribed, (track) => {
+    if (track.kind === LK.Track.Kind.Audio) {
+      const el = track.attach();
+      document.body.appendChild(el);
+    }
+  });
+  room.on(LK.RoomEvent.DataReceived, (payload, _p, _k, topic) => {
+    if (topic === "hospital.ui") onUiData(payload);
+  });
+  room.on(LK.RoomEvent.Disconnected, () => teardown("line idle"));
+
+  await room.connect(url, token);
+  await room.localParticipant.setMicrophoneEnabled(true);
+
+  connected = true;
+  $("callBtn").classList.add("on");
+  $("callLabel").textContent = "End call";
+  setStatus(`connected · room <b>${roomName}</b> · waiting for the desk…`);
+  logTurn("SYSTEM", "line connected — the front desk will greet you", "system");
+}
+
+function teardown(statusText) {
+  connected = false;
+  $("callBtn").classList.remove("on");
+  $("callLabel").textContent = "Call the front desk";
+  setStatus(statusText);
+}
+
+$("callBtn").addEventListener("click", async () => {
+  if (!connected) {
+    try { await connect(); }
+    catch (e) {
+      console.error(e);
+      setStatus("could not connect — is livekit-server and the token server running?");
+    }
+  } else {
+    await room?.disconnect();
+    teardown("call ended");
+  }
+});
+
+// Secure-context reminder (same caveat as the old build, surfaced in-UI).
+if (!window.isSecureContext && !["localhost","127.0.0.1"].includes(location.hostname)) {
+  $("envNote").textContent = "mic blocked: open via localhost/https, or allow this origin in chrome://flags";
+  $("envNote").style.color = "var(--cardio)";
+}
+</script>
+</body>
+</html>
