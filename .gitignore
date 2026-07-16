@@ -2,3 +2,4 @@ plans/
 .env
 .venv/
 .chatterbox-venv/
+__pycache__/
