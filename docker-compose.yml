@@ -8,12 +8,13 @@ services:
   livekit:
     image: livekit/livekit-server:latest
     restart: unless-stopped
+    # host networking, not a published 50000-60000/udp port range: Docker's userland-proxy/iptables
+    # port publishing for a ~10k-port range is catastrophically slow to set up/tear down (observed:
+    # a single container removal took ~15 minutes and wedged the daemon) — LiveKit's own self-host
+    # docs recommend network_mode: host for this exact reason.
+    network_mode: host
     command: --config /etc/livekit.yaml
     volumes:
       - ./livekit.yaml:/etc/livekit.yaml:ro
-    ports:
-      - "7880:7880"
-      - "7881:7881"
-      - "50000-60000:50000-60000/udp"
     depends_on:
       - redis

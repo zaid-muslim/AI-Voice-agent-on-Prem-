@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Voice Agent</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    max-width: 720px;
+    margin: 40px auto;
+    background: #0f1115;
+    color: #e6e6e6;
+    padding: 0 16px;
+  }
+  h1 { font-size: 1.4rem; font-weight: 600; }
+  #history {
+    border: 1px solid #2a2d34;
+    border-radius: 10px;
+    padding: 16px;
+    height: 420px;
+    overflow-y: auto;
+    background: #15181f;
+    margin-bottom: 16px;
+  }
+  .msg { margin-bottom: 12px; line-height: 1.4; }
+  .msg .who { font-weight: 600; }
+  .msg.you .who { color: #6ea8fe; }
+  .msg.agent .who { color: #8ee08e; }
+  #controls {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  #micBtn {
+    width: 84px;
+    height: 84px;
+    border-radius: 50%;
+    border: none;
+    background: #2a2d34;
+    color: #fff;
+    font-size: 1.6rem;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s, transform 0.1s;
+  }
+  #micBtn.recording { background: #3a7d44; }
+  #micBtn.muted { background: #d9534f; }
+  #status {
+    color: #9aa0a6;
+    font-size: 0.95rem;
+  }
+  #textForm {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  #textInput {
+    flex: 1;
+    padding: 10px 14px;
+    border-radius: 8px;
+    border: 1px solid #2a2d34;
+    background: #1b1e25;
+    color: #e6e6e6;
+    font-size: 0.95rem;
+  }
+  #textInput:focus { outline: 1px solid #6ea8fe; }
+  #sendBtn {
+    padding: 10px 16px;
+    border-radius: 8px;
+    border: 1px solid #2a2d34;
+    background: #1b1e25;
+    color: #e6e6e6;
+    font-size: 0.95rem;
+    cursor: pointer;
+  }
+  #sendBtn:hover { background: #22262f; }
+  #startOverlay {
+    text-align: center;
+    padding: 48px 16px;
+    border: 1px solid #2a2d34;
+    border-radius: 10px;
+    background: #15181f;
+    margin-bottom: 16px;
+  }
+  #startBtn {
+    padding: 14px 28px;
+    border-radius: 8px;
+    border: none;
+    background: #6ea8fe;
+    color: #0f1115;
+    font-size: 1.05rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  #startBtn:hover { background: #8bb9ff; }
+  #startBtn:disabled { background: #3a3f4a; cursor: default; }
+  #startHint {
+    margin-top: 12px;
+    color: #9aa0a6;
+    font-size: 0.9rem;
+  }
+  #startError {
+    margin-top: 12px;
+    color: #ff8080;
+    font-size: 0.9rem;
+    display: none;
+  }
+</style>
+</head>
+<body>
+  <h1>Voice Agent</h1>
+  <div id="history"></div>
+  <div id="startOverlay">
+    <button id="startBtn">▶ Start Call</button>
+    <div id="startHint">Joins a LiveKit room and connects you with the agent — your browser
+      will ask for microphone permission.</div>
+    <div id="startError"></div>
+  </div>
+  <div id="controls" style="display:none">
+    <button id="micBtn">🎙</button>
+    <div id="status">Connecting…</div>
+  </div>
+  <form id="textForm" autocomplete="off" style="display:none">
+    <input id="textInput" type="text" placeholder="Or type a message instead of speaking…">
+    <button id="sendBtn" type="submit">Send</button>
+  </form>
+
+<script type="module">
+import { Room, RoomEvent, Track } from "./vendor/livekit-client.esm.mjs";
+
+const historyEl = document.getElementById("history");
+const micBtn = document.getElementById("micBtn");
+const statusEl = document.getElementById("status");
+const startOverlay = document.getElementById("startOverlay");
+const startBtn = document.getElementById("startBtn");
+const startErrorEl = document.getElementById("startError");
+const controlsEl = document.getElementById("controls");
+const textFormEl = document.getElementById("textForm");
+const textInput = document.getElementById("textInput");
+
+let room = null;
+let micEnabled = false;
+
+function setStatus(text) { statusEl.textContent = text; }
+
+// #status lives inside #controls, which is still hidden before a successful connect — an error
+// during startCall() would otherwise be set but literally invisible. Mirror it here too.
+function showStartError(text) {
+  setStatus(text);
+  startErrorEl.textContent = text;
+  startErrorEl.style.display = "block";
+}
+
+if (!window.isSecureContext) {
+  showStartError(
+    "This page isn't loaded over a secure origin (HTTPS, or localhost) — your browser will " +
+    "block microphone access. You'll still be able to connect and type, but not speak."
+  );
+}
+
+function appendMessage(who, text) {
+  const div = document.createElement("div");
+  div.className = "msg " + (who === "You" ? "you" : "agent");
+  div.innerHTML = `<span class="who">${who}:</span> <span class="text"></span>`;
+  div.querySelector(".text").textContent = text;
+  historyEl.appendChild(div);
+  historyEl.scrollTop = historyEl.scrollHeight;
+  return div;
+}
+
+// Agent state ("listening" | "thinking" | "speaking" | "idle" | "initializing") is published
+// automatically by AgentSession as the agent participant's `lk.agent.state` attribute — this
+// drives the status line instead of any bespoke protocol message.
+const AGENT_STATE_LABELS = {
+  initializing: "Connecting…",
+  idle: "Ready",
+  listening: "Listening…",
+  thinking: "Thinking…",
+  speaking: "Agent speaking…",
+};
+
+function applyAgentState(participant) {
+  const state = participant.attributes && participant.attributes["lk.agent.state"];
+  if (participant.isAgent && state) setStatus(AGENT_STATE_LABELS[state] || state);
+}
+
+async function startCall() {
+  startBtn.disabled = true;
+  setStatus("Connecting…");
+
+  let token, url;
+  try {
+    const resp = await fetch("/api/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    if (!resp.ok) throw new Error(`token request failed: ${resp.status}`);
+    ({ token, url } = await resp.json());
+  } catch (err) {
+    console.error("Failed to get access token:", err);
+    showStartError("Couldn't reach the token server: " + err.message);
+    startBtn.disabled = false;
+    return;
+  }
+
+  room = new Room({ adaptiveStream: true, dynacast: true });
+
+  // Both the caller's own live STT transcript and the agent's spoken transcript arrive on this
+  // one topic (AgentSession's RoomIO convention), distinguished by sender identity. Each call to
+  // the handler corresponds to one growing utterance/segment — chunks are incremental text to
+  // append, not the full text resent each time.
+  room.registerTextStreamHandler("lk.transcription", async (reader, participantInfo) => {
+    const isYou = participantInfo.identity === room.localParticipant.identity;
+    const bubble = appendMessage(isYou ? "You" : "Agent", "");
+    for await (const chunk of reader) {
+      bubble.querySelector(".text").textContent += chunk;
+      historyEl.scrollTop = historyEl.scrollHeight;
+    }
+  });
+
+  room.on(RoomEvent.TrackSubscribed, (track) => {
+    if (track.kind === Track.Kind.Audio) {
+      const el = track.attach();
+      el.style.display = "none";
+      document.body.appendChild(el);
+    }
+  });
+
+  room.on(RoomEvent.ParticipantAttributesChanged, (_changed, participant) => applyAgentState(participant));
+  room.on(RoomEvent.ParticipantConnected, (participant) => applyAgentState(participant));
+  room.on(RoomEvent.Disconnected, () => {
+    setStatus("Disconnected");
+    micBtn.classList.remove("recording", "muted");
+  });
+
+  try {
+    await room.connect(url, token);
+    for (const p of room.remoteParticipants.values()) applyAgentState(p);
+  } catch (err) {
+    console.error("Failed to connect to the room:", err);
+    showStartError("Connection error: " + err.message);
+    startBtn.disabled = false;
+    return;
+  }
+
+  // Mic access is best-effort, not a precondition for the rest of the UI: it routinely fails on
+  // an insecure origin (see the isSecureContext check above) even though the room connection
+  // itself — and so typed text — works fine. Don't strand the user on the start screen for it.
+  try {
+    await room.localParticipant.setMicrophoneEnabled(true);
+    micEnabled = true;
+    micBtn.classList.add("recording");
+  } catch (err) {
+    console.error("Failed to enable microphone:", err);
+    micEnabled = false;
+    micBtn.classList.add("muted");
+    micBtn.disabled = true;
+    micBtn.title = "Microphone unavailable: " + err.message;
+  }
+
+  startOverlay.style.display = "none";
+  controlsEl.style.display = "flex";
+  textFormEl.style.display = "flex";
+  setStatus(micEnabled ? "Listening…" : "Mic unavailable — you can still type");
+}
+
+startBtn.addEventListener("click", startCall);
+
+// Real-time listening is continuous once connected (Silero VAD + barge-in run server-side,
+// same as before) — this button is a mute toggle, not a start/stop-listening switch.
+micBtn.addEventListener("click", async () => {
+  if (!room) return;
+  micEnabled = !micEnabled;
+  await room.localParticipant.setMicrophoneEnabled(micEnabled);
+  micBtn.classList.toggle("recording", micEnabled);
+  micBtn.classList.toggle("muted", !micEnabled);
+  setStatus(micEnabled ? "Listening…" : "Muted");
+});
+
+// Typed text skips STT entirely — the agent takes the text as-is and runs the same
+// LLM (+ tool-calling) + TTS pipeline as a spoken turn (AgentSession's `lk.chat` text-input topic).
+textFormEl.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const text = textInput.value.trim();
+  if (!text || !room) return;
+  textInput.value = "";
+  try {
+    await room.localParticipant.sendText(text, { topic: "lk.chat" });
+  } catch (err) {
+    console.error("Failed to send text:", err);
+    setStatus("Failed to send: " + err.message);
+  }
+});
+</script>
+</body>
+</html>

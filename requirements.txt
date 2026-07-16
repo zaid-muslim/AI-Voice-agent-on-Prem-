@@ -1,0 +1,17 @@
+# STT / RAG / verification — unchanged from the original Pipeline
+faster-whisper>=1.0
+numpy
+python-dateutil>=2.8   # tolerant parsing of spoken dates for card-block verification
+fastembed               # CPU-only ONNX embeddings (BAAI/bge-small-en-v1.5) for search_business_docs RAG tool
+aiohttp>=3.9             # Chatterbox HTTP client, web_search tool
+
+# LiveKit agent worker
+livekit-agents>=1.6
+livekit-plugins-openai>=1.6   # LLM plugin, pointed at vLLM's OpenAI-compatible endpoint
+livekit-plugins-silero>=1.6   # default VAD
+python-dotenv>=1.0
+
+# Token server (Phase 1 web surface)
+livekit-api>=1.2
+fastapi>=0.110
+uvicorn>=0.30

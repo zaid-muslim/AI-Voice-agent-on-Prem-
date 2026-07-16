@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""Token server for the web frontend (Phase 1 web-surface migration).
+
+Today's WS-based server.py has zero auth on its raw socket — this is the first place real auth
+gets added: the browser must hit this endpoint to get a signed LiveKit access token before it can
+join a room at all. Also serves web/ so the whole frontend + auth flow is one process/origin for
+local dev, matching run.sh's single-`python3 -m http.server` simplicity in the original Pipeline.
+"""
+import os
+import secrets
+from datetime import timedelta
+
+import uvicorn
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from livekit import api
+from pydantic import BaseModel
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
+
+LIVEKIT_API_KEY = os.environ["LIVEKIT_API_KEY"]
+LIVEKIT_API_SECRET = os.environ["LIVEKIT_API_SECRET"]
+# What the *browser* should dial. Usually the same as LIVEKIT_URL (what the worker process uses
+# to reach the LiveKit server) — kept as a separate var only because the worker and a browser on
+# another machine on the LAN can need different hostnames for the same server.
+LIVEKIT_PUBLIC_URL = os.environ.get("LIVEKIT_PUBLIC_URL", os.environ.get("LIVEKIT_URL", ""))
+TOKEN_SERVER_PORT = int(os.environ.get("TOKEN_SERVER_PORT", "3000"))
+WEB_DIR = os.path.join(PROJECT_ROOT, "web")
+
+TOKEN_TTL_SECONDS = 6 * 60 * 60  # long enough for one call session; not a durable credential
+
+app = FastAPI(title="Bank Voice Agent — Token Server")
+app.add_middleware(
+    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
+)
+
+
+class TokenRequest(BaseModel):
+    identity: str | None = None
+    room: str | None = None
+
+
+class TokenResponse(BaseModel):
+    token: str
+    url: str
+    room: str
+    identity: str
+
+
+@app.post("/api/token", response_model=TokenResponse)
+def issue_token(req: TokenRequest) -> TokenResponse:
+    if not LIVEKIT_PUBLIC_URL:
+        raise HTTPException(500, "LIVEKIT_PUBLIC_URL (or LIVEKIT_URL) is not configured")
+
+    # A fresh room per call by default — one caller per room, exactly like today's one-WS-
+    # connection-per-caller model; a caller-supplied room name (not used by the current
+    # frontend) is honored for callers who want to rejoin a specific room.
+    room = req.room or f"call-{secrets.token_hex(4)}"
+    identity = req.identity or f"caller-{secrets.token_hex(4)}"
+
+    grants = api.VideoGrants(room_join=True, room=room, can_publish=True, can_subscribe=True)
+    token = (
+        api.AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
+        .with_identity(identity)
+        .with_ttl(timedelta(seconds=TOKEN_TTL_SECONDS))
+        .with_grants(grants)
+        .to_jwt()
+    )
+    return TokenResponse(token=token, url=LIVEKIT_PUBLIC_URL, room=room, identity=identity)
+
+
+# Serve the frontend last so it doesn't shadow /api/*.
+app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=TOKEN_SERVER_PORT)

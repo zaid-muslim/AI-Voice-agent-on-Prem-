@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""LiveKit AgentSession worker for the bank receptionist agent (Phase 0/1 of the LiveKit
-migration). Reuses banking.py/db.py/rag.py/convo_log.py and config/bank_config.json unchanged
-from the original Pipeline (see the migration plan) — this file replaces src/server.py's custom
+"""LiveKit AgentSession worker for the bank receptionist agent (Phase 1 web-surface migration).
+Reuses banking.py/db.py/rag.py/convo_log.py and config/bank_config.json unchanged from the
+original Pipeline (see the migration plan) — this file replaces src/server.py's custom
 WebSocket/VAD orchestration with LiveKit's AgentSession, and wraps the same faster-whisper model
 and Chatterbox microservice as custom STT/TTS plugins (whisper_stt.py, chatterbox_tts.py).
 """
 import json
 import os
 import re
+import time
 from datetime import datetime
 
 import aiohttp
+from dotenv import load_dotenv
 from faster_whisper import WhisperModel
 
 from livekit.agents import (
@@ -19,6 +21,8 @@ from livekit.agents import (
     JobContext,
     JobProcess,
     ModelSettings,
+    RoomInputOptions,
+    RoomOutputOptions,
     RunContext,
     WorkerOptions,
     cli,
@@ -36,6 +40,8 @@ from whisper_stt import WhisperSTT
 
 # ── Config ────────────────────────────────────────────────────────────────────
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
+
 VLLM_URL = os.environ.get("VLLM_URL", "http://localhost:8000/v1")
 VLLM_MODEL = os.environ.get("VLLM_MODEL", "qwen2.5-14b-awq")
 CHATTERBOX_URL = os.environ.get("CHATTERBOX_URL", "http://localhost:8766/synthesize")
@@ -138,9 +144,10 @@ def save_memory(fact: str) -> bool:
 
 
 def build_instructions() -> str:
-    """Ported from build_system_prompt() in src/server.py — same persona/scope/tool-usage rules,
-    minus per-turn freshness (date/memory reloaded once at Agent construction for this spike;
-    Phase 1 should re-render this per turn the way the original re-read it every prompt build)."""
+    """Ported from build_system_prompt() in src/server.py — same persona/scope/tool-usage rules.
+    Called once at Agent construction and again every turn (on_user_turn_completed calls
+    update_instructions()) so date/memory freshness matches the original re-reading it on every
+    prompt build."""
     now = datetime.now().astimezone()
     now_str = now.strftime("%A, %B %d, %Y, %I:%M %p %Z")
     domain_block = format_domain_block(load_domain_config())
@@ -181,29 +188,71 @@ def build_instructions() -> str:
 
 
 class BankReceptionistAgent(Agent):
-    def __init__(self):
+    def __init__(self, session_id: str):
         super().__init__(instructions=build_instructions())
+        self._session_id = session_id
+        # Set synchronously inside block_card so tts_node's guardrail can tell a genuine
+        # success apart from a hallucinated one within the same turn (see tts_node below).
+        self._last_block_card_status: str | None = None
+        # Accumulates the in-flight turn for convo_log; flushed when the *next* turn starts
+        # (or the session closes) since a turn's reply/tool-call events land as separate async
+        # AgentSession events with no single synchronous "turn done" callback to log from.
+        self._turn: dict | None = None
+
+    def flush_turn_log(self) -> None:
+        t, self._turn = self._turn, None
+        if t is None:
+            return
+        timings = {"total_ms": (time.monotonic() - t["t_start"]) * 1000} if t["t_start"] else None
+        try:
+            convo_log.log_turn(
+                session_id=self._session_id,
+                user_text=t["user_text"],
+                retrieval=t["retrieval"],
+                tool_events=t["tool_events"],
+                reply=t["reply"].strip(),
+                timings=timings,
+            )
+        except Exception as e:
+            # Logging must never break a call (convo_log.py's own stated contract).
+            print(f"  [convo_log] failed to log turn: {e}")
 
     # ── Always-on RAG: inject retrieved chunks right before the caller's question,
-    # never as a tool call the model has to decide to invoke (src/rag.py, unchanged). ──────────
-    async def on_user_turn_completed(self, turn_ctx, new_message) -> None:
-        query_text = new_message.text_content or ""
+    # never as a tool call the model has to decide to invoke (src/rag.py, unchanged). Shared by
+    # on_user_turn_completed (real speech turns) AND the text-input path (typed chat messages) —
+    # AgentSession routes those through two different, non-overlapping code paths (STT-driven
+    # turns call on_user_turn_completed; text_input_cb calls generate_reply() directly, which does
+    # NOT go through on_user_turn_completed at all) that would otherwise silently skip RAG
+    # grounding and instruction freshness for typed input. ───────────────────────────────────────
+    async def prepare_turn(self, query_text: str, chat_ctx, insert_before_ts: float) -> None:
+        self.flush_turn_log()  # the previous turn is done now that this new one is starting
+        self._last_block_card_status = None
+        self._turn = {
+            "user_text": query_text, "t_start": time.monotonic(),
+            "tool_events": [], "reply": "", "retrieval": None,
+        }
+
+        # Re-render instructions every turn (date/memory freshness) — matches the original
+        # server.py rebuilding its system prompt on every LLM call, not just once at startup.
+        await self.update_instructions(build_instructions())
+
         history = [
-            {"role": m.role, "content": m.text_content or ""} for m in turn_ctx.messages()
+            {"role": m.role, "content": m.text_content or ""} for m in chat_ctx.messages()
         ] + [{"role": "user", "content": query_text}]
 
         retrieval_query = rag.build_retrieval_query(history)
         queries = [query_text] if retrieval_query == query_text else [query_text, retrieval_query]
         retrieval = rag.search_docs_multi(queries, k=RAG_INJECT_TOP_K)
+        self._turn["retrieval"] = {**retrieval, "queries": queries}
 
         print(f"  [rag] status={retrieval['status']} queries={queries}")
         if retrieval["status"] == "found":
             context_block = "\n\n".join(
                 f"[{r['source']} :: {r.get('section')}]\n{r['text']}" for r in retrieval["results"]
             )
-            # created_at just before new_message's own timestamp so ChatContext.insert() (which
-            # sorts new_message in by created_at) places it *after* this system message, not before.
-            turn_ctx.add_message(
+            # created_at just before insert_before_ts so ChatContext's created_at-sorted insertion
+            # places this system message right before the caller's turn, not after.
+            chat_ctx.add_message(
                 role="system",
                 content=(
                     "Reference information from the bank's documents, relevant to the caller's "
@@ -211,8 +260,11 @@ class BankReceptionistAgent(Agent):
                     "if the specific detail isn't here, say you don't have it on file.\n\n"
                     + context_block
                 ),
-                created_at=new_message.created_at - 0.001,
+                created_at=insert_before_ts - 0.001,
             )
+
+    async def on_user_turn_completed(self, turn_ctx, new_message) -> None:
+        await self.prepare_turn(new_message.text_content or "", turn_ctx, new_message.created_at)
 
     # ── Output guardrail: never let a "card blocked / identity verified" claim reach audio
     # unless block_card actually returned "blocked" this turn (banking.py, unchanged). ─────────
@@ -244,10 +296,11 @@ class BankReceptionistAgent(Agent):
         async for frame in AgentCls.default.tts_node(self, filtered(), model_settings):
             yield frame
 
-        if tripped:
-            # Defense-in-depth backstop tripped with no corresponding tool result this turn —
-            # speak a truthful correction. (Phase 1 TODO: only fire this when block_card wasn't
-            # also called this turn, to avoid double-speaking alongside the tool's own outcome line.)
+        if tripped and self._last_block_card_status != "blocked":
+            # Suppressed text wasn't backed by a real success this turn — speak a truthful
+            # correction. When block_card DID return "blocked" this turn, its own outcome line
+            # already spoke the (correct) confirmation; saying this fallback too would just be a
+            # confusing, false-sounding double-speak on top of a genuine success.
             self.session.say(UNVERIFIED_BLOCK_FALLBACK, add_to_chat_ctx=True)
 
     # ── Tools ────────────────────────────────────────────────────────────────────────────────
@@ -292,6 +345,7 @@ class BankReceptionistAgent(Agent):
             {"card_last4": card_last4, "mother_maiden_name": mother_maiden_name, "dob": dob},
         )
         status = outcome["status"]
+        self._last_block_card_status = status
         print(f"  block_card -> {status} (attempts={ctx.userdata.get('failed_card_attempts', 0)})")
         # Spoken deterministically from the tool result, never phrased by the model.
         ctx.session.say(CARD_OUTCOME_LINES.get(status, "I'm sorry, I can't confirm that."))
@@ -307,6 +361,31 @@ class BankReceptionistAgent(Agent):
         outcome = banking.queue_handoff(DB_CONN, {"reason": reason, "customer_id": customer_id})
         print(f"  request_human_handoff -> ticket {outcome.get('ticket_id')}")
         return json.dumps(outcome)
+
+
+def _describe_tool_call(call, output) -> dict:
+    """Build one convo_log tool-event dict from a FunctionCall/FunctionCallOutput pair —
+    shapes matching what convo_log._tool_lines() knows how to render per tool name."""
+    try:
+        args = json.loads(call.arguments) if call.arguments else {}
+    except (json.JSONDecodeError, TypeError):
+        args = {}
+    out = {}
+    if output is not None and output.output:
+        try:
+            out = json.loads(output.output)
+        except (json.JSONDecodeError, TypeError):
+            out = {}
+    ev = {"tool": call.name}
+    if call.name == "web_search":
+        ev["query"] = args.get("query", "")
+    elif call.name == "remember":
+        ev["fact"] = args.get("fact", "")
+    elif call.name == "block_card":
+        ev["status"] = out.get("status")
+    elif call.name == "request_human_handoff":
+        ev["ticket_id"] = out.get("ticket_id")
+    return ev
 
 
 # ── Worker entrypoint ─────────────────────────────────────────────────────────
@@ -326,6 +405,8 @@ def prewarm(proc: JobProcess):
 async def entrypoint(ctx: JobContext):
     await ctx.connect()
 
+    agent = BankReceptionistAgent(session_id=ctx.room.name)
+
     session = AgentSession(
         vad=ctx.proc.userdata["vad"],
         stt=WhisperSTT(model=ctx.proc.userdata["whisper_model"]),
@@ -334,8 +415,77 @@ async def entrypoint(ctx: JobContext):
         userdata={"failed_card_attempts": 0},
     )
 
-    await session.start(agent=BankReceptionistAgent(), room=ctx.room)
+    # convo_log wiring: AgentSession has no single synchronous "turn done" callback, so the
+    # in-flight turn (started in on_user_turn_completed) is filled in here as its pieces arrive
+    # and flushed when the next turn starts (see BankReceptionistAgent.flush_turn_log).
+    @session.on("conversation_item_added")
+    def _on_item_added(ev) -> None:
+        if agent._turn is not None and getattr(ev.item, "role", None) == "assistant":
+            agent._turn["reply"] += ev.item.text_content or ""
+
+    @session.on("function_tools_executed")
+    def _on_tools_executed(ev) -> None:
+        if agent._turn is None:
+            return
+        for call, output in zip(ev.function_calls, ev.function_call_outputs):
+            agent._turn["tool_events"].append(_describe_tool_call(call, output))
+
+    @session.on("close")
+    def _on_close(ev) -> None:
+        agent.flush_turn_log()
+
+    # AgentSession's default text-input handling (typed chat messages, e.g. from the web
+    # frontend's text form) calls generate_reply() directly and never touches
+    # on_user_turn_completed — silently skipping RAG injection/instruction refresh for typed
+    # input otherwise. Route it through the same prepare_turn() real speech turns use.
+    async def _on_text_input(sess: AgentSession, ev) -> None:
+        async with sess._claim_user_turn():
+            await sess.interrupt()
+            await agent.prepare_turn(ev.text, sess.history, time.time())
+            sess.generate_reply(user_input=ev.text)
+
+    await session.start(
+        agent=agent, room=ctx.room,
+        # RoomInputOptions defaults to 24kHz audio delivery; faster-whisper's feature extraction
+        # is hardcoded for 16kHz (transcribe() takes a raw array with no sample-rate parameter to
+        # tell it otherwise) — left at the default, every utterance reaches Whisper effectively
+        # sped up 1.5x, producing badly garbled transcripts despite the identical model/settings
+        # the original server.py used (which captured mic audio at 16kHz end-to-end). Match that
+        # here instead of resampling by hand in whisper_stt.py.
+        room_input_options=RoomInputOptions(text_input_cb=_on_text_input, audio_sample_rate=16000),
+        # Default word-by-word transcription pacing assumes it can read real-time playback
+        # progress from the TTS output to time each word's reveal — Chatterbox is a blocking,
+        # whole-clip-per-sentence backend (see chatterbox_tts.py), not a smooth per-frame
+        # streaming one, so that pacing estimate runs behind and reads as stuttery, with audio
+        # sometimes finishing a word before the synced-paced text catches up to show it. Emitting
+        # text as soon as it's generated instead (no audio-locked pacing) reads better here.
+        room_output_options=RoomOutputOptions(sync_transcription=False),
+    )
+
+    # Greet the caller immediately, before they say anything — matches src/server.py's
+    # greet_caller(), which fires the instant the connection opens rather than waiting for a
+    # first utterance. Not a real user turn (bypasses on_user_turn_completed / RAG injection),
+    # so it's logged with the same placeholder marker the original used.
+    agent._turn = {
+        "user_text": "[call connected — greeting]", "t_start": time.monotonic(),
+        "tool_events": [], "reply": "", "retrieval": None,
+    }
+    session.generate_reply(
+        instructions="The call has just connected. Greet the caller now, briefly and warmly."
+    )
 
 
 if __name__ == "__main__":
-    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm))
+    cli.run_app(
+        WorkerOptions(
+            entrypoint_fnc=entrypoint,
+            prewarm_fnc=prewarm,
+            # Production mode's default (min(cpu_count, 4)) prewarms that many processes
+            # concurrently, each loading its own full Whisper model onto the GPU — OOMs
+            # immediately alongside vLLM's own GPU budget. Today's GPU sizing (vLLM
+            # gpu_memory_utilization=0.5, int8 Whisper, Chatterbox) assumes exactly one
+            # active call at a time (see migration plan's concurrency section) — revisit
+            # once the Phase 3 replica-pool design lands.
+            num_idle_processes=1,
+        )
+    )

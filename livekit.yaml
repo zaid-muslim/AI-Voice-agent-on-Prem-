@@ -5,6 +5,8 @@ rtc:
   port_range_end: 60000
   use_external_ip: false
 redis:
-  address: redis:6379
+  # host networking (see docker-compose.yml) has no compose DNS, so reach redis via the
+  # host-published port instead of the service name.
+  address: 127.0.0.1:6379
 keys:
   devkey: Fh/JM5WbHJ466Ir9vfmtC9jDOaCZZQVYYFFWd/G7AiA=

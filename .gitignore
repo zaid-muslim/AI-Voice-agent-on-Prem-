@@ -3,3 +3,4 @@ plans/
 .venv/
 .chatterbox-venv/
 __pycache__/
+.claude/
