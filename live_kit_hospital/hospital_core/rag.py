@@ -24,6 +24,16 @@ before/after is the proof the semantic path is worth installing.
 NOT for appointment availability or booking - check_availability and
 book_appointment remain the only tools for those; this is for the static
 informational questions those tools were never meant to answer.
+
+LIVEKIT COMPAT NOTE (this revision): the original version of this file was
+written for Pipecat - it took a `params` object as its first argument and
+spoke results through `params.result_callback(string)` instead of
+returning anything, and it was wrapped in `@with_adaptive_filler` from a
+`tool_filler.py` that doesn't exist in a LiveKit-style agent. Both are
+gone. `search_hospital_info(query)` now just returns a plain dict, which
+is exactly what compat.py's `_call()` expects to await and hand back -
+LiveKit's own function-calling loop wants the same shape natively, so this
+also removes the need for compat.py as a translation layer for this tool.
 """
 
 import asyncio
@@ -34,13 +44,7 @@ try:
 except ImportError:
     from hospital_kb import HOSPITAL_KB
 
-try:
-    from .tool_filler import with_adaptive_filler
-except ImportError:
-    from tool_filler import with_adaptive_filler
-
 TOP_K = 3
-MIN_KEYWORD_OVERLAP = 1  # fallback-only: need at least this many shared words
 
 # --- semantic backend (preferred) ------------------------------------------
 
@@ -50,7 +54,10 @@ _kb_texts = None
 
 
 def _try_load_embedder() -> bool:
-    """Lazy-load once. Returns True if the real semantic backend is usable."""
+    """Lazy-load once. Returns True if the real semantic backend is usable.
+    Also the hook compat.py's warm_rag() calls at startup, before the first
+    real call is accepted, so the model doesn't lazy-load mid-conversation
+    and blow through a function-call timeout."""
     global _embedder, _kb_embeddings, _kb_texts
     if _embedder is not None:
         return True
@@ -96,34 +103,29 @@ def _search(query: str, k: int = TOP_K) -> List[Tuple[dict, float]]:
     return _keyword_search(query, k)
 
 
-def _format_results(results: List[Tuple[dict, float]]) -> str:
-    relevant = [entry for entry, score in results if score > 0]
-    if not relevant:
-        return "no matching information found"
-    return " ".join(entry["text"] for entry in relevant)
-
-
-@with_adaptive_filler(threshold_secs=0.6, filler_text="Let me look that up.")
-async def search_hospital_info(params, query: str):
+async def search_hospital_info(query: str) -> dict:
     """Search Riverside General's general information: hours, departments,
     doctors, insurance, billing, prescriptions, visiting policy, lab
     results, or parking. Do NOT use this for appointment availability or
     booking - use check_availability / book_appointment for those.
+
+    Returns {"status": "ok", "answer": "..."} on a match, or
+    {"status": "not_found", "message": "..."} if nothing scored above zero.
     """
     results = await asyncio.to_thread(_search, query, TOP_K)
-    await params.result_callback(_format_results(results))
+    relevant = [entry for entry, score in results if score > 0]
+    if not relevant:
+        return {
+            "status": "not_found",
+            "message": "No information found for that. Tell the caller you "
+            "don't have that information rather than guessing.",
+        }
+    return {"status": "ok", "answer": " ".join(entry["text"] for entry in relevant)}
 
 
 # --- self-test --------------------------------------------------------
 
 if __name__ == "__main__":
-
-    class FakeParams:
-        def __init__(self):
-            self.result = None
-
-        async def result_callback(self, result):
-            self.result = result
 
     async def _run():
         backend_is_semantic = _try_load_embedder()
@@ -136,24 +138,33 @@ if __name__ == "__main__":
 
         results = []
 
-        p1 = FakeParams()
-        await search_hospital_info(p1, "what are your hours")
-        ok1 = any(w in p1.result for w in ("8 AM", "8:00", "24 hours"))
-        results.append(("direct keyword query: hours", ok1, p1.result))
+        r1 = await search_hospital_info("what are your hours")
+        ok1 = r1["status"] == "ok" and any(
+            w in r1["answer"] for w in ("8 AM", "8:00", "24 hours")
+        )
+        results.append(("direct keyword query: hours", ok1, r1))
 
-        p2 = FakeParams()
-        await search_hospital_info(p2, "who works in cardiology")
-        ok2 = any(w in p2.result for w in ("Patel", "Osei", "Cardiology"))
-        results.append(("direct keyword query: cardiology", ok2, p2.result))
+        r2 = await search_hospital_info("who works in cardiology")
+        ok2 = r2["status"] == "ok" and any(
+            w in r2["answer"] for w in ("Malik", "Siddiqui", "Cardiology")
+        )
+        results.append(("direct keyword query: cardiology", ok2, r2))
 
-        p3 = FakeParams()
-        await search_hospital_info(p3, "who can I see for my heart")
-        ok3 = any(w in p3.result for w in ("Patel", "Osei", "Cardiology", "cardiology"))
+        r3 = await search_hospital_info("who can I see for my heart")
+        ok3 = r3["status"] == "ok" and any(
+            w in r3["answer"] for w in ("Malik", "Siddiqui", "Cardiology", "cardiology")
+        )
         note = (
             "(zero shared words with 'cardiology' - keyword fallback is "
             "EXPECTED to fail this; sentence-transformers should pass it)"
         )
-        results.append((f"semantic query: heart -> cardiology {note}", ok3, p3.result))
+        results.append((f"semantic query: heart -> cardiology {note}", ok3, r3))
+
+        r4 = await search_hospital_info("asdkjqwoe nonsense gibberish query")
+        ok4 = r4["status"] in ("not_found",) or (
+            r4["status"] == "ok"  # semantic backend may still weakly match; that's fine
+        )
+        results.append(("nonsense query doesn't crash", ok4, r4))
 
         for desc, ok, detail in results:
             status = (

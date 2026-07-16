@@ -60,6 +60,18 @@ from livekit.agents import (
 )
 from livekit.plugins import openai, silero
 
+# Imported at module level (not lazily inside entrypoint) so this plugin
+# REGISTERS ITSELF with `python agent.py download-files` - a lazy import
+# inside entrypoint() never runs during that CLI command, which is why
+# only openai/silero showed up on the first download-files pass.
+try:
+    from livekit.plugins.turn_detector.english import EnglishModel
+
+    _TURN_DETECTOR_INSTALLED = True
+except ImportError:
+    EnglishModel = None
+    _TURN_DETECTOR_INSTALLED = False
+
 import compat
 from helpers import DEFAULT_FILLERS, push_ui, run_with_filler
 from plugins.qwen_tts import QwenSubprocessTTS
@@ -79,20 +91,36 @@ MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "300"))
 def _make_stt():
     """Parakeet TDT by default (SOTA local: leaderboard-topping accuracy,
     RTFx fast enough that a whole utterance transcribes in tens of ms).
-    Whisper stays one env var away - it's the proven-in-your-calls fallback
-    and handles Urdu code-switching more gracefully (Parakeet v2 is
-    English-only)."""
+
+    Three-way fallback chain, in order:
+      1. PARAKEET_PYTHON is set -> subprocess plugin. This is the path that
+         actually works when the main agent's venv is Python 3.12, since
+         NeMo's ASR extras currently fail to build there (see README) -
+         Parakeet runs isolated in its own 3.10/3.11 venv instead, same
+         architecture as the Qwen TTS worker.
+      2. PARAKEET_PYTHON unset but `nemo` importable HERE -> in-process
+         plugin (only works if your main venv itself is 3.10/3.11).
+      3. Neither -> faster-whisper, the proven fallback. Also handles Urdu
+         code-switching better (Parakeet v2 is English-only)."""
     if STT_BACKEND == "parakeet":
+        if os.environ.get("PARAKEET_PYTHON"):
+            from plugins.parakeet_stt_subprocess import ParakeetSubprocessSTT
+
+            logger.info(
+                f"STT backend: Parakeet (subprocess, venv={os.environ['PARAKEET_PYTHON']})"
+            )
+            return ParakeetSubprocessSTT()
         try:
             from plugins.parakeet_stt import ParakeetSTT
 
-            logger.info(f"STT backend: Parakeet ({PARAKEET_MODEL})")
+            logger.info(f"STT backend: Parakeet (in-process, {PARAKEET_MODEL})")
             return ParakeetSTT(model=PARAKEET_MODEL)
         except ImportError as exc:
             logger.warning(
-                f"STT_BACKEND=parakeet but NeMo isn't importable ({exc}) - "
-                "falling back to faster-whisper. `pip install -U nemo_toolkit['asr']` "
-                "to enable Parakeet."
+                f"STT_BACKEND=parakeet but NeMo isn't importable here ({exc}) and "
+                "PARAKEET_PYTHON isn't set - falling back to faster-whisper. Set "
+                "PARAKEET_PYTHON/PARAKEET_WORKER in .env to use the subprocess "
+                "plugin instead (see README)."
             )
     from plugins.whisper_stt import FasterWhisperSTT
 
@@ -402,12 +430,21 @@ async def entrypoint(ctx: JobContext) -> None:
     # this whole migration. Falls back to plain VAD end-pointing if the
     # plugin isn't installed, so the agent still runs.
     turn_detection = None
-    try:
-        from livekit.plugins.turn_detector.english import EnglishModel
-
-        turn_detection = EnglishModel()
-        logger.info("Semantic turn detector: ENABLED (english).")
-    except ImportError:
+    if _TURN_DETECTOR_INSTALLED:
+        try:
+            turn_detection = EnglishModel()
+            logger.info("Semantic turn detector: ENABLED (english).")
+        except Exception as exc:  # noqa: BLE001
+            # Most common cause: `python agent.py download-files` was never
+            # run (or ran before this plugin was registered), so the
+            # model's languages.json etc. aren't on disk yet. This must NOT
+            # crash the whole job - fall back to VAD-only endpointing.
+            logger.warning(
+                f"Turn detector model unavailable ({exc}) - falling back to "
+                "VAD-only endpointing. Run `python agent.py download-files` "
+                "once to fetch the model, then restart to re-enable it."
+            )
+    else:
         logger.warning(
             "livekit-agents[turn-detector] not installed - falling back to "
             "VAD-only endpointing (works, but you lose the latency win)."
@@ -451,5 +488,17 @@ async def entrypoint(ctx: JobContext) -> None:
 
 if __name__ == "__main__":
     agents.cli.run_app(
-        agents.WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm)
+        agents.WorkerOptions(
+            entrypoint_fnc=entrypoint,
+            prewarm_fnc=prewarm,
+            # DEFAULT IS 10s. prewarm() loads Silero VAD + STT (whisper or
+            # Parakeet) + the RAG sentence-transformers embedder - on a
+            # cold cache (first run, or first HF download) that combination
+            # can easily exceed 10s, and LiveKit kills the process mid-load
+            # with no useful error beyond "no process became available".
+            # 120s gives real headroom for a first-time model download;
+            # once everything is cached locally this returns in a few
+            # seconds and the extra timeout costs nothing.
+            initialize_process_timeout=120.0,
+        )
     )

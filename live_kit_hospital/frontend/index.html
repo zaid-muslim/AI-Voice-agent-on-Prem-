@@ -416,7 +416,11 @@ $("callBtn").addEventListener("click", async () => {
     try { await connect(); }
     catch (e) {
       console.error(e);
-      setStatus("could not connect — is livekit-server and the token server running?");
+      // Surface the REAL error, not a generic guess - e.name/e.message
+      // usually says exactly what failed (NotAllowedError = mic blocked,
+      // a WebSocket/connection error = livekit-server unreachable, etc.)
+      const detail = e?.name ? `${e.name}: ${e.message || ""}` : String(e);
+      setStatus(`could not connect — ${detail}`);
     }
   } else {
     await room?.disconnect();
