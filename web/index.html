@@ -210,7 +210,19 @@ async function startCall() {
   // one topic (AgentSession's RoomIO convention), distinguished by sender identity. Each call to
   // the handler corresponds to one growing utterance/segment — chunks are incremental text to
   // append, not the full text resent each time.
+  //
+  // Known livekit-agents quirk (confirmed against the SDK source, not a bug in this app): the
+  // caller's own transcript output is built with is_delta_stream=False, and for every final STT
+  // result RoomIO calls capture_text(full_text) *then* flush() — each of which independently
+  // publishes a complete text stream with the same content, so the same utterance arrives twice.
+  // Both copies share the same lk.segment_id attribute, so dedupe on that.
+  const seenTranscriptSegments = new Set();
   room.registerTextStreamHandler("lk.transcription", async (reader, participantInfo) => {
+    const segmentId = reader.info.attributes && reader.info.attributes["lk.segment_id"];
+    if (segmentId) {
+      if (seenTranscriptSegments.has(segmentId)) return;
+      seenTranscriptSegments.add(segmentId);
+    }
     const isYou = participantInfo.identity === room.localParticipant.identity;
     const bubble = appendMessage(isYou ? "You" : "Agent", "");
     for await (const chunk of reader) {
@@ -280,11 +292,15 @@ micBtn.addEventListener("click", async () => {
 
 // Typed text skips STT entirely — the agent takes the text as-is and runs the same
 // LLM (+ tool-calling) + TTS pipeline as a spoken turn (AgentSession's `lk.chat` text-input topic).
+// Unlike speech, nothing ever echoes typed text back on `lk.transcription` (there's no STT pass
+// to republish) — render the "You" bubble locally instead of waiting for a round-trip that
+// will never arrive.
 textFormEl.addEventListener("submit", async (e) => {
   e.preventDefault();
   const text = textInput.value.trim();
   if (!text || !room) return;
   textInput.value = "";
+  appendMessage("You", text);
   try {
     await room.localParticipant.sendText(text, { topic: "lk.chat" });
   } catch (err) {
