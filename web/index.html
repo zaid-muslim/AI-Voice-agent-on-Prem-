@@ -105,12 +105,86 @@
     font-size: 0.9rem;
     display: none;
   }
+  #modelSelectOverlay {
+    padding: 24px;
+    border: 1px solid #2a2d34;
+    border-radius: 10px;
+    background: #15181f;
+    margin-bottom: 16px;
+  }
+  #modelSelectOverlay h2 { font-size: 1.1rem; font-weight: 600; margin: 0 0 16px; }
+  #modelPicker fieldset {
+    border: 1px solid #2a2d34;
+    border-radius: 8px;
+    margin-bottom: 12px;
+    padding: 10px 14px;
+  }
+  #modelPicker legend {
+    padding: 0 6px;
+    color: #9aa0a6;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  #modelPicker label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 0;
+    font-size: 0.95rem;
+    cursor: pointer;
+  }
+  #confirmBtn {
+    margin-top: 8px;
+    padding: 12px 24px;
+    border-radius: 8px;
+    border: none;
+    background: #6ea8fe;
+    color: #0f1115;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  #confirmBtn:hover { background: #8bb9ff; }
+  #confirmBtn:disabled { background: #3a3f4a; cursor: default; }
+  .progressRow {
+    padding: 8px 0;
+    font-size: 0.95rem;
+    color: #e6e6e6;
+    border-bottom: 1px solid #2a2d34;
+  }
+  .progressRow:last-child { border-bottom: none; }
+  .progressStatus { color: #9aa0a6; }
+  .progressStatus.loading { color: #6ea8fe; }
+  .progressStatus.ready { color: #8ee08e; }
+  .progressStatus.error { color: #ff8080; }
+  #modelSelectError {
+    margin-top: 12px;
+    color: #ff8080;
+    font-size: 0.9rem;
+    display: none;
+  }
 </style>
 </head>
 <body>
   <h1>Voice Agent</h1>
   <div id="history"></div>
-  <div id="startOverlay">
+  <div id="modelSelectOverlay">
+    <h2>Choose your pipeline</h2>
+    <div id="modelPicker">
+      <fieldset id="llmChoices"><legend>LLM</legend></fieldset>
+      <fieldset id="sttChoices"><legend>Speech-to-text</legend></fieldset>
+      <fieldset id="ttsChoices"><legend>Text-to-speech</legend></fieldset>
+      <button id="confirmBtn">Confirm &amp; Load Models</button>
+    </div>
+    <div id="loadProgress" style="display:none">
+      <div class="progressRow" data-cat="llm">LLM: <span class="progressStatus">pending</span></div>
+      <div class="progressRow" data-cat="stt">STT: <span class="progressStatus">pending</span></div>
+      <div class="progressRow" data-cat="tts">TTS: <span class="progressStatus">pending</span></div>
+    </div>
+    <div id="modelSelectError"></div>
+  </div>
+  <div id="startOverlay" style="display:none">
     <button id="startBtn">▶ Start Call</button>
     <div id="startHint">Joins a LiveKit room and connects you with the agent — your browser
       will ask for microphone permission.</div>
@@ -137,6 +211,12 @@ const startErrorEl = document.getElementById("startError");
 const controlsEl = document.getElementById("controls");
 const textFormEl = document.getElementById("textForm");
 const textInput = document.getElementById("textInput");
+
+const modelSelectOverlay = document.getElementById("modelSelectOverlay");
+const modelPicker = document.getElementById("modelPicker");
+const loadProgress = document.getElementById("loadProgress");
+const modelSelectError = document.getElementById("modelSelectError");
+const confirmBtn = document.getElementById("confirmBtn");
 
 let room = null;
 let micEnabled = false;
@@ -308,6 +388,128 @@ textFormEl.addEventListener("submit", async (e) => {
     setStatus("Failed to send: " + err.message);
   }
 });
+
+// ── Model selection (gates everything above): the pipeline loads nothing on the backend until
+// a choice is confirmed here. Shown first; #startOverlay stays hidden until orchestration
+// (src/orchestrator.py, via token_server.py's /api/selection endpoints) reports every backend
+// ready. Selection is per pipeline-run, not per-call — once confirmed it can't be changed
+// without restarting the whole pipeline (Ctrl+C run.sh and rerun).
+const CATEGORY_LABELS = { llm: "LLM", stt: "STT", tts: "TTS" };
+
+function showModelSelectError(text) {
+  modelSelectError.textContent = text;
+  modelSelectError.style.display = "block";
+}
+
+function renderChoices(fieldset, category, entries) {
+  for (const entry of entries) {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = category;
+    input.value = entry.id;
+    if (entries.length === 1) input.checked = true;   // only one option today — pre-select it
+    label.appendChild(input);
+    label.appendChild(document.createTextNode(entry.label));
+    fieldset.appendChild(label);
+  }
+}
+
+function showProgress(status) {
+  for (const [category, state] of Object.entries(status.backends || {})) {
+    const row = loadProgress.querySelector(`.progressRow[data-cat="${category}"] .progressStatus`);
+    if (row) {
+      row.textContent = state.status;
+      row.className = "progressStatus " + state.status;
+    }
+  }
+}
+
+function revealStartOverlay() {
+  modelSelectOverlay.style.display = "none";
+  startOverlay.style.display = "block";
+}
+
+function pollSelectionStatus() {
+  const iv = setInterval(async () => {
+    let status;
+    try {
+      status = await (await fetch("/api/selection/status")).json();
+    } catch (err) {
+      return;   // transient fetch failure — try again next tick
+    }
+    showProgress(status);
+    if (status.phase === "ready") {
+      clearInterval(iv);
+      revealStartOverlay();
+    } else if (status.phase === "error") {
+      clearInterval(iv);
+      showModelSelectError(status.error || "Failed to load the selected models.");
+    }
+  }, 1000);
+}
+
+async function confirmSelection() {
+  const selection = {};
+  for (const category of Object.keys(CATEGORY_LABELS)) {
+    const checked = document.querySelector(`input[name="${category}"]:checked`);
+    if (!checked) return showModelSelectError(`Please choose a ${CATEGORY_LABELS[category]} option.`);
+    selection[category] = checked.value;
+  }
+  confirmBtn.disabled = true;
+  try {
+    const resp = await fetch("/api/selection", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(selection),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || `request failed: ${resp.status}`);
+    }
+  } catch (err) {
+    console.error("Failed to submit selection:", err);
+    showModelSelectError("Failed to start loading: " + err.message);
+    confirmBtn.disabled = false;
+    return;
+  }
+  modelPicker.style.display = "none";
+  loadProgress.style.display = "block";
+  pollSelectionStatus();
+}
+
+async function initModelSelect() {
+  let status;
+  try {
+    status = await (await fetch("/api/selection/status")).json();
+  } catch (err) {
+    return showModelSelectError("Couldn't reach the token server: " + err.message);
+  }
+
+  // Handles a page reload mid-loading or after the pipeline is already up.
+  if (status.phase === "ready") return revealStartOverlay();
+  if (status.phase === "loading") {
+    modelPicker.style.display = "none";
+    loadProgress.style.display = "block";
+    showProgress(status);
+    pollSelectionStatus();
+    return;
+  }
+  if (status.phase === "error") return showModelSelectError(status.error || "Pipeline failed to load.");
+
+  let models;
+  try {
+    models = await (await fetch("/api/models")).json();
+  } catch (err) {
+    return showModelSelectError("Couldn't load available models: " + err.message);
+  }
+  renderChoices(document.getElementById("llmChoices"), "llm", models.llm || []);
+  renderChoices(document.getElementById("sttChoices"), "stt", models.stt || []);
+  renderChoices(document.getElementById("ttsChoices"), "tts", models.tts || []);
+  confirmBtn.addEventListener("click", confirmSelection);
+}
+
+initModelSelect();
 </script>
 </body>
 </html>

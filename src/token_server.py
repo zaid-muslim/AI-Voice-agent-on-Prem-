@@ -8,6 +8,7 @@ local dev, matching run.sh's single-`python3 -m http.server` simplicity in the o
 """
 import os
 import secrets
+from contextlib import asynccontextmanager
 from datetime import timedelta
 
 import uvicorn
@@ -17,6 +18,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from livekit import api
 from pydantic import BaseModel
+
+import orchestrator
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
@@ -32,7 +35,17 @@ WEB_DIR = os.path.join(PROJECT_ROOT, "web")
 
 TOKEN_TTL_SECONDS = 6 * 60 * 60  # long enough for one call session; not a durable credential
 
-app = FastAPI(title="Bank Voice Agent — Token Server")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    # vLLM/Chatterbox/the agent worker (if a selection was ever confirmed) are children of this
+    # process, launched by orchestrator.py — tear them down when this process does, so Ctrl+C on
+    # run.sh (which now just runs this server in the foreground) cleans up everything.
+    await orchestrator.shutdown_all()
+
+
+app = FastAPI(title="Bank Voice Agent — Token Server", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
@@ -48,6 +61,12 @@ class TokenResponse(BaseModel):
     url: str
     room: str
     identity: str
+
+
+class SelectionRequest(BaseModel):
+    llm: str
+    stt: str
+    tts: str
 
 
 @app.post("/api/token", response_model=TokenResponse)
@@ -70,6 +89,32 @@ def issue_token(req: TokenRequest) -> TokenResponse:
         .to_jwt()
     )
     return TokenResponse(token=token, url=LIVEKIT_PUBLIC_URL, room=room, identity=identity)
+
+
+@app.get("/api/models")
+def list_models() -> dict:
+    """Id/label only — launch details (paths, ports, CUDA env) stay server-side."""
+    cfg = orchestrator.load_models_config()
+    return {
+        category: [{"id": e["id"], "label": e["label"]} for e in entries]
+        for category, entries in cfg.items()
+    }
+
+
+@app.post("/api/selection", status_code=202)
+async def submit_selection(req: SelectionRequest) -> dict:
+    try:
+        await orchestrator.start_selection(req.model_dump())
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+    return {"status": "starting"}
+
+
+@app.get("/api/selection/status")
+def selection_status() -> dict:
+    return orchestrator.get_status()
 
 
 # Serve the frontend last so it doesn't shadow /api/*.

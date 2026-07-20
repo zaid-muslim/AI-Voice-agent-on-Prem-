@@ -1,0 +1,48 @@
+{
+  "llm": [
+    {
+      "id": "qwen2.5-14b-awq",
+      "label": "Qwen 2.5 14B Instruct (AWQ, vLLM)",
+      "vllm_bin": "/home/nauyan/miniconda3/bin/vllm",
+      "model": "Qwen/Qwen2.5-14B-Instruct-AWQ",
+      "served_model_name": "qwen2.5-14b-awq",
+      "port": 8000,
+      "cuda_home": "/home/nauyan/miniconda3/lib/python3.13/site-packages/nvidia/cu13",
+      "extra_path_dirs": ["/home/nauyan/miniconda3/bin"],
+      "extra_env": { "VLLM_USE_FLASHINFER_SAMPLER": "0" },
+      "launch_args": [
+        "--enable-auto-tool-choice", "--tool-call-parser", "hermes",
+        "--gpu-memory-utilization", "0.5", "--max-model-len", "8192"
+      ],
+      "log_file": "logs/vllm.log",
+      "readiness": { "type": "http", "path": "/v1/models" },
+      "startup_timeout_s": 120
+    }
+  ],
+  "stt": [
+    {
+      "id": "faster-whisper-large-v3",
+      "label": "faster-whisper large-v3 (GPU, int8_float16)",
+      "model_size": "large-v3",
+      "compute_type": "int8_float16",
+      "device": "cuda",
+      "device_index": 0,
+      "language": "en",
+      "cuda_lib_dir": "/usr/local/lib/ollama/cuda_v12",
+      "startup_timeout_s": 90
+    }
+  ],
+  "tts": [
+    {
+      "id": "chatterbox-turbo",
+      "label": "Chatterbox Turbo",
+      "python_bin": "../Pipeline/.chatterbox-venv/bin/python3",
+      "script": "../Pipeline/src/chatterbox_server.py",
+      "port": 8766,
+      "url_path": "/synthesize",
+      "log_file": "logs/chatterbox.log",
+      "readiness": { "type": "log_grep", "pattern": "Chatterbox Turbo ready" },
+      "startup_timeout_s": 90
+    }
+  ]
+}

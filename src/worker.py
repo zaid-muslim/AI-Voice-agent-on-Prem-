@@ -42,9 +42,19 @@ from whisper_stt import WhisperSTT
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
+# These three (plus the WHISPER_* block below) are fallback defaults only, for running this
+# file directly (debugging, bypassing the orchestrator). In normal operation, src/orchestrator.py
+# sets all of them as real environment variables on this process before it starts — load_dotenv()
+# defaults to override=False, so .env's values never clobber what the orchestrator already set,
+# they only apply when nothing else has.
 VLLM_URL = os.environ.get("VLLM_URL", "http://localhost:8000/v1")
 VLLM_MODEL = os.environ.get("VLLM_MODEL", "qwen2.5-14b-awq")
 CHATTERBOX_URL = os.environ.get("CHATTERBOX_URL", "http://localhost:8766/synthesize")
+WHISPER_MODEL_SIZE = os.environ.get("WHISPER_MODEL_SIZE", "large-v3")
+WHISPER_COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "int8_float16")
+WHISPER_DEVICE = os.environ.get("WHISPER_DEVICE", "cuda")
+WHISPER_DEVICE_INDEX = int(os.environ.get("WHISPER_DEVICE_INDEX", "0"))
+WHISPER_LANGUAGE = os.environ.get("WHISPER_LANGUAGE", "en")
 SEARXNG_URL = "http://localhost:1234/search"
 WEB_SEARCH_RESULT_COUNT = 4
 RAG_INJECT_TOP_K = 4
@@ -392,13 +402,17 @@ def _describe_tool_call(call, output) -> dict:
 def prewarm(proc: JobProcess):
     print("Loading Silero VAD...")
     proc.userdata["vad"] = silero.VAD.load()
-    print("Loading faster-whisper (large-v3, GPU int8)...")
+    print(f"Loading faster-whisper ({WHISPER_MODEL_SIZE}, {WHISPER_DEVICE} {WHISPER_COMPUTE_TYPE})...")
     proc.userdata["whisper_model"] = WhisperModel(
-        "large-v3", compute_type="int8_float16", device="cuda", device_index=0
+        WHISPER_MODEL_SIZE, compute_type=WHISPER_COMPUTE_TYPE,
+        device=WHISPER_DEVICE, device_index=WHISPER_DEVICE_INDEX,
     )
     print("Loading RAG embedding index...")
     rag.init(DB_CONN)
     rag.warmup()
+    # src/orchestrator.py greps the worker's log for this exact string as the readiness signal
+    # for the whole worker subprocess (the "stt" category in the model-selection UI) — don't
+    # reword it without updating _launch_worker() there too.
     print("Prewarm complete.")
 
 
@@ -409,7 +423,7 @@ async def entrypoint(ctx: JobContext):
 
     session = AgentSession(
         vad=ctx.proc.userdata["vad"],
-        stt=WhisperSTT(model=ctx.proc.userdata["whisper_model"]),
+        stt=WhisperSTT(model=ctx.proc.userdata["whisper_model"], language=WHISPER_LANGUAGE),
         llm=openai.LLM(model=VLLM_MODEL, base_url=VLLM_URL, api_key="not-needed"),
         tts=ChatterboxTTS(url=CHATTERBOX_URL),
         userdata={"failed_card_attempts": 0},
