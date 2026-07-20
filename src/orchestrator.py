@@ -11,6 +11,7 @@ at pipeline boot — nothing here should silently diverge from that proven bash 
 import asyncio
 import json
 import os
+import signal
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -96,14 +97,17 @@ async def _run(llm_entry: dict, stt_entry: dict, tts_entry: dict) -> None:
         # Safe to launch concurrently: worker.py's prewarm() (Whisper/VAD) has no dependency on
         # vLLM/Chatterbox being up, and the frontend never reveals "Start Call" until phase ==
         # "ready" (all three green) — so no real call can reach entrypoint() before vLLM/
-        # Chatterbox are actually ready, regardless of launch order. If this box's documented
-        # CUDA finickiness (see run.sh's git history re: libnvrtc.so.13/libcublas.so.12) ever
-        # makes concurrent CUDA init flaky in practice, switch this to sequential awaits.
-        await asyncio.gather(
-            _launch_vllm(llm_entry),
-            _launch_chatterbox(tts_entry),
-            _launch_worker(llm_entry, stt_entry, tts_entry),
-        )
+        # Chatterbox are actually ready, regardless of launch order.
+        #
+        # Sequential, not parallel: confirmed in practice on this box that concurrent CUDA init
+        # (vLLM loading a 14B model at the same time as faster-whisper's own CUDA context/model
+        # load) starves the worker's prewarm badly enough to blow past its startup_timeout_s —
+        # worker.log showed "Prewarm complete." eventually, just way past 90s. Loading one at a
+        # time avoids the GPU/PCIe contention; the total wall-clock cost is the sum instead of
+        # the max, but that's the safer trade on this hardware.
+        await _launch_vllm(llm_entry)
+        await _launch_chatterbox(tts_entry)
+        await _launch_worker(llm_entry, stt_entry, tts_entry)
         STATE.phase = "ready"
     except Exception as e:
         STATE.phase = "error"
@@ -113,9 +117,28 @@ async def _run(llm_entry: dict, stt_entry: dict, tts_entry: dict) -> None:
 
 async def _spawn(cmd: list[str], env: dict, log_path: Path) -> asyncio.subprocess.Process:
     logf = open(log_path, "wb")
+    # start_new_session=True puts the child in its own process group (pgid == child pid). vLLM
+    # in particular forks a separate "VLLM::EngineCore" child that holds ALL the GPU memory and
+    # does NOT die when only its parent is signalled — a plain terminate() on the parent leaves
+    # that EngineCore orphaned (reparented to init), still holding ~13GB, which then makes the
+    # next vLLM launch fail with "Engine core initialization failed". Killing the whole process
+    # group (see _terminate_group) takes the EngineCore down with the parent. Same protection
+    # for the agent worker, which also spawns its own job-executor subprocesses.
     return await asyncio.create_subprocess_exec(
         *cmd, cwd=str(PROJECT_ROOT), env=env, stdout=logf, stderr=asyncio.subprocess.STDOUT,
+        start_new_session=True,
     )
+
+
+def _terminate_group(proc: asyncio.subprocess.Process, sig: int = signal.SIGTERM) -> None:
+    """Signal the child's entire process group, so children it spawned (vLLM's EngineCore, the
+    worker's job executors) go down with it rather than orphaning and holding the GPU."""
+    if proc.returncode is not None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), sig)
+    except ProcessLookupError:
+        pass  # already gone
 
 
 async def _http_ready(port: int, path: str) -> bool:
@@ -149,7 +172,7 @@ async def _poll_until(ready_check, proc: asyncio.subprocess.Process, log_path: P
         if await ready_check():
             return
         if time.monotonic() - start > timeout_s:
-            proc.kill()
+            _terminate_group(proc, signal.SIGKILL)  # group, so a stuck vLLM's EngineCore dies too
             raise RuntimeError(f"{what} did not become ready within {timeout_s}s — see {log_path}")
         await asyncio.sleep(1)
 
@@ -223,23 +246,23 @@ async def _launch_worker(llm_entry: dict, stt_entry: dict, tts_entry: dict) -> N
 
 async def _kill_remaining() -> None:
     for proc in STATE.procs.values():
-        if proc.returncode is None:
-            proc.terminate()
+        _terminate_group(proc)
 
 
 async def shutdown_all() -> None:
     """Called from token_server.py's FastAPI shutdown hook — the Python analog of run.sh's
     cleanup() trap. Terminates worker first so it deregisters from LiveKit cleanly before its
-    backends (vLLM/Chatterbox) disappear out from under it."""
+    backends (vLLM/Chatterbox) disappear out from under it. Signals whole process groups, not
+    just the direct children, so vLLM's EngineCore (which holds the GPU) can't be orphaned."""
     for name in ("worker", "tts", "llm"):
         proc = STATE.procs.get(name)
-        if proc and proc.returncode is None:
-            proc.terminate()
+        if proc:
+            _terminate_group(proc)
     for proc in STATE.procs.values():
         try:
             await asyncio.wait_for(proc.wait(), timeout=10)
         except asyncio.TimeoutError:
-            proc.kill()
+            _terminate_group(proc, signal.SIGKILL)
 
 
 def get_status() -> dict:

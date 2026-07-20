@@ -5,6 +5,7 @@ original Pipeline (see the migration plan) — this file replaces src/server.py'
 WebSocket/VAD orchestration with LiveKit's AgentSession, and wraps the same faster-whisper model
 and Chatterbox microservice as custom STT/TTS plugins (whisper_stt.py, chatterbox_tts.py).
 """
+import asyncio
 import json
 import os
 import re
@@ -27,8 +28,13 @@ from livekit.agents import (
     WorkerOptions,
     cli,
     function_tool,
+    tts,
+    utils,
 )
-from livekit.agents.voice.agent import Agent as AgentCls
+# Imported by name (not the `tokenize` module) on purpose: FastStartSentenceTokenizer below has a
+# method named `tokenize` (required by the base class), which would shadow the module inside the
+# class body and break the `-> SentenceStream` annotations.
+from livekit.agents.tokenize import SentenceStream, SentenceTokenizer, TokenData
 from livekit.plugins import openai, silero
 
 import banking
@@ -65,6 +71,93 @@ MAX_MEMORIES = 60
 
 # Same suppression predicate the original server.py's guardrail used (banking.py, unchanged).
 SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+# For the very first chunk of a reply only, also break at the earliest clause boundary
+# (comma/semicolon/colon) once a small floor of characters has accumulated, so audio starts after
+# a few words ("Sure,") instead of waiting for the model to finish a whole first sentence — the
+# single biggest source of start latency. Ported verbatim from the original server.py, which
+# benchmarked the 5-char floor against real vLLM streams + live Chatterbox (short lead-ins
+# synthesize ~0.28s at 5 chars vs ~0.5-0.7s at a full sentence). After the first chunk, everything
+# settles back into full-sentence chunks. Breaking mid-first-sentence is safe for the guardrail
+# below: asserts_block_success() matches on word presence (\bblocked\b, etc.), not whole sentences.
+FIRST_CHUNK_END = re.compile(r"(?<=[.!?,;:])\s+")
+FIRST_CHUNK_MIN_CHARS = 5
+
+
+class _FastStartSentenceStream(SentenceStream):
+    """Streaming sentence tokenizer that emits the FIRST chunk of a reply at the earliest clause
+    boundary (comma/semicolon/colon) past FIRST_CHUNK_MIN_CHARS, then full sentences after — the
+    original server.py's start-latency optimization. Handing these chunks to tts.StreamAdapter
+    (instead of splitting-then-synthesizing by hand in tts_node) keeps the adapter's pipelined
+    synthesis, so audio stays gapless — the naive per-chunk approach stalled on each blocking
+    Chatterbox call between chunks, which is what caused the noise cuts between words."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._buf = ""
+        self._first_done = False
+        self._seg = utils.shortuuid()
+
+    def _emit(self, text: str) -> None:
+        text = text.strip()
+        if text:
+            self._event_ch.send_nowait(TokenData(token=text, segment_id=self._seg))
+
+    def _drain(self) -> None:
+        if not self._first_done:
+            for m in FIRST_CHUNK_END.finditer(self._buf):
+                if len(self._buf[: m.start()].strip()) >= FIRST_CHUNK_MIN_CHARS:
+                    self._emit(self._buf[: m.end()])
+                    self._buf = self._buf[m.end():]
+                    self._first_done = True
+                    break
+        while True:
+            m = SENTENCE_END.search(self._buf)
+            if not m:
+                break
+            self._emit(self._buf[: m.end()])
+            self._buf = self._buf[m.end():]
+
+    def push_text(self, text: str) -> None:
+        self._check_not_closed()
+        if text:
+            self._buf += text
+            self._drain()
+
+    def flush(self) -> None:
+        self._check_not_closed()
+        self._drain()
+        if self._buf.strip():
+            self._emit(self._buf)
+        self._buf = ""
+
+    def end_input(self) -> None:
+        self.flush()
+        self._event_ch.close()
+
+    async def aclose(self) -> None:
+        self._event_ch.close()
+
+
+class FastStartSentenceTokenizer(SentenceTokenizer):
+    """SentenceTokenizer wrapper around _FastStartSentenceStream (see it for the why)."""
+
+    def tokenize(self, text: str, *, language: str | None = None) -> list[str]:
+        out, first_done = [], False
+        if not first_done:
+            for m in FIRST_CHUNK_END.finditer(text):
+                if len(text[: m.start()].strip()) >= FIRST_CHUNK_MIN_CHARS:
+                    out.append(text[: m.end()].strip())
+                    text = text[m.end():]
+                    first_done = True
+                    break
+        for part in SENTENCE_END.split(text):
+            if part.strip():
+                out.append(part.strip())
+        return out
+
+    def stream(self, *, language: str | None = None) -> SentenceStream:
+        return _FastStartSentenceStream()
+
 
 CARD_OUTCOME_LINES = {
     "blocked": "Your card has been blocked. Is there anything else I can help you with?",
@@ -208,6 +301,9 @@ class BankReceptionistAgent(Agent):
         # (or the session closes) since a turn's reply/tool-call events land as separate async
         # AgentSession events with no single synchronous "turn done" callback to log from.
         self._turn: dict | None = None
+        # Lazily built on first tts_node call (needs self.session.tts, only available once the
+        # session is running); reused so its metrics listener registers once, not per turn.
+        self._tts_adapter: tts.StreamAdapter | None = None
 
     def flush_turn_log(self) -> None:
         t, self._turn = self._turn, None
@@ -281,6 +377,20 @@ class BankReceptionistAgent(Agent):
     async def tts_node(self, text, model_settings: ModelSettings):
         tripped = False
 
+        def _log_reply(sentence: str) -> None:
+            # convo_log capture point: with sync_transcription=False (see session.start() below),
+            # the framework never fires conversation_item_added for assistant messages — a real
+            # SDK quirk, confirmed empirically, not something fixable from here — so nothing else
+            # in this file reliably sees the model's spoken output. tts_node does, for every TTS
+            # call (both generate_reply's streamed text and any session.say(), since Chatterbox is
+            # the only registered TTS path either way), so capture the turn's reply here instead.
+            if self._turn is not None:
+                self._turn["reply"] += sentence
+
+        # filtered() splits the LLM text stream into whole sentences purely for the guardrail +
+        # convo_log capture; the actual audio chunking (fast first clause, then sentences) is done
+        # downstream by FastStartSentenceTokenizer inside the StreamAdapter. Splitting on sentences
+        # here is enough for the guardrail since asserts_block_success() matches on word presence.
         async def filtered():
             nonlocal tripped
             buf = ""
@@ -291,20 +401,43 @@ class BankReceptionistAgent(Agent):
                     if not m:
                         break
                     sentence, buf = buf[: m.end()], buf[m.end():]
-                    if banking.asserts_block_success(sentence):
+                    if not banking.asserts_block_success(sentence):
+                        _log_reply(sentence)
+                        yield sentence
+                    else:
                         tripped = True
                         print(f"  [guardrail] suppressed: {sentence[:70]!r}")
-                        continue
-                    yield sentence
             if buf.strip():
-                if banking.asserts_block_success(buf):
+                if not banking.asserts_block_success(buf):
+                    _log_reply(buf)
+                    yield buf
+                else:
                     tripped = True
                     print(f"  [guardrail] suppressed: {buf[:70]!r}")
-                else:
-                    yield buf
 
-        async for frame in AgentCls.default.tts_node(self, filtered(), model_settings):
-            yield frame
+        # Feed the guardrail-approved text into a StreamAdapter whose FastStartSentenceTokenizer
+        # emits the first clause early (fast speech start) and full sentences after. The adapter
+        # keeps the framework's *pipelined* synthesis — it synthesizes upcoming sentences while the
+        # current one plays — so audio stays gapless. (Bypassing it and synthesizing each chunk
+        # inline stalled on every blocking Chatterbox call, which is what caused noise cuts between
+        # words.) Cached on the agent so the adapter's metrics listener is registered once, not per
+        # turn. Only the audio path changes; the browser transcript is forwarded separately.
+        if self._tts_adapter is None:
+            self._tts_adapter = tts.StreamAdapter(
+                tts=self.session.tts, sentence_tokenizer=FastStartSentenceTokenizer()
+            )
+        async with self._tts_adapter.stream() as tts_stream:
+            async def _forward() -> None:
+                async for sentence in filtered():
+                    tts_stream.push_text(sentence)
+                tts_stream.end_input()
+
+            forward_task = asyncio.create_task(_forward())
+            try:
+                async for ev in tts_stream:
+                    yield ev.frame
+            finally:
+                await utils.aio.cancel_and_wait(forward_task)
 
         if tripped and self._last_block_card_status != "blocked":
             # Suppressed text wasn't backed by a real success this turn — speak a truthful
@@ -400,20 +533,25 @@ def _describe_tool_call(call, output) -> dict:
 
 # ── Worker entrypoint ─────────────────────────────────────────────────────────
 def prewarm(proc: JobProcess):
-    print("Loading Silero VAD...")
+    # flush=True on every line: this runs in a forked/spawned job-executor subprocess, not the
+    # process `-u`/PYTHONUNBUFFERED was set on — its stdout is block-buffered by default once
+    # redirected to a file, so without explicit flushing these prints (and the "Prewarm
+    # complete." signal src/orchestrator.py greps for) can sit unflushed for a very long time
+    # even though prewarm itself already finished, making the worker look hung when it isn't.
+    print("Loading Silero VAD...", flush=True)
     proc.userdata["vad"] = silero.VAD.load()
-    print(f"Loading faster-whisper ({WHISPER_MODEL_SIZE}, {WHISPER_DEVICE} {WHISPER_COMPUTE_TYPE})...")
+    print(f"Loading faster-whisper ({WHISPER_MODEL_SIZE}, {WHISPER_DEVICE} {WHISPER_COMPUTE_TYPE})...", flush=True)
     proc.userdata["whisper_model"] = WhisperModel(
         WHISPER_MODEL_SIZE, compute_type=WHISPER_COMPUTE_TYPE,
         device=WHISPER_DEVICE, device_index=WHISPER_DEVICE_INDEX,
     )
-    print("Loading RAG embedding index...")
+    print("Loading RAG embedding index...", flush=True)
     rag.init(DB_CONN)
     rag.warmup()
     # src/orchestrator.py greps the worker's log for this exact string as the readiness signal
     # for the whole worker subprocess (the "stt" category in the model-selection UI) — don't
     # reword it without updating _launch_worker() there too.
-    print("Prewarm complete.")
+    print("Prewarm complete.", flush=True)
 
 
 async def entrypoint(ctx: JobContext):
@@ -431,12 +569,10 @@ async def entrypoint(ctx: JobContext):
 
     # convo_log wiring: AgentSession has no single synchronous "turn done" callback, so the
     # in-flight turn (started in on_user_turn_completed) is filled in here as its pieces arrive
-    # and flushed when the next turn starts (see BankReceptionistAgent.flush_turn_log).
-    @session.on("conversation_item_added")
-    def _on_item_added(ev) -> None:
-        if agent._turn is not None and getattr(ev.item, "role", None) == "assistant":
-            agent._turn["reply"] += ev.item.text_content or ""
-
+    # and flushed when the next turn starts (see BankReceptionistAgent.flush_turn_log). Reply
+    # text itself is captured in tts_node, not via conversation_item_added — see the comment
+    # there for why (sync_transcription=False silently stops that event firing for assistant
+    # messages, confirmed empirically against the installed livekit-agents version).
     @session.on("function_tools_executed")
     def _on_tools_executed(ev) -> None:
         if agent._turn is None:
@@ -473,6 +609,9 @@ async def entrypoint(ctx: JobContext):
         # streaming one, so that pacing estimate runs behind and reads as stuttery, with audio
         # sometimes finishing a word before the synced-paced text catches up to show it. Emitting
         # text as soon as it's generated instead (no audio-locked pacing) reads better here.
+        # Side effect (confirmed empirically, not documented behavior): this also silently stops
+        # the SDK emitting conversation_item_added for assistant messages, which is why reply
+        # text for convo_log is captured in tts_node instead of via that event — see there.
         room_output_options=RoomOutputOptions(sync_transcription=False),
     )
 

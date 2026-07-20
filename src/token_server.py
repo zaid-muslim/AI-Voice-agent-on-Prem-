@@ -13,7 +13,7 @@ from datetime import timedelta
 
 import uvicorn
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from livekit import api
@@ -26,12 +26,28 @@ load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
 LIVEKIT_API_KEY = os.environ["LIVEKIT_API_KEY"]
 LIVEKIT_API_SECRET = os.environ["LIVEKIT_API_SECRET"]
-# What the *browser* should dial. Usually the same as LIVEKIT_URL (what the worker process uses
-# to reach the LiveKit server) — kept as a separate var only because the worker and a browser on
-# another machine on the LAN can need different hostnames for the same server.
-LIVEKIT_PUBLIC_URL = os.environ.get("LIVEKIT_PUBLIC_URL", os.environ.get("LIVEKIT_URL", ""))
+# The LiveKit URL the *browser* dials for signaling+media. By default it's derived per-request
+# from the host the browser used to reach this token server (see _livekit_url_for) — so a LAN
+# client that loaded http://192.168.x.x:3000 gets ws://192.168.x.x:7880, and a tailnet client
+# that loaded http://100.x.x.x:3000 gets ws://100.x.x.x:7880, each pointing at a host it can
+# actually route to (LiveKit binds 0.0.0.0:7880, reachable at both). Set LIVEKIT_PUBLIC_URL only
+# to FORCE one fixed URL for every client (e.g. an HTTPS reverse-proxy setup) — a fixed value is
+# exactly what stops a non-tailnet LAN colleague from connecting when it's pinned to a tailnet IP.
+LIVEKIT_PUBLIC_URL = os.environ.get("LIVEKIT_PUBLIC_URL", "")
+LIVEKIT_RTC_PORT = int(os.environ.get("LIVEKIT_RTC_PORT", "7880"))
 TOKEN_SERVER_PORT = int(os.environ.get("TOKEN_SERVER_PORT", "3000"))
 WEB_DIR = os.path.join(PROJECT_ROOT, "web")
+
+
+def _livekit_url_for(request: Request) -> str:
+    """The LiveKit signaling URL this particular client should dial. Explicit override wins;
+    otherwise derive it from the request host so each client reaches LiveKit at the same address
+    it already reached this server on (no fixed tailnet/LAN assumption baked in)."""
+    if LIVEKIT_PUBLIC_URL:
+        return LIVEKIT_PUBLIC_URL
+    host = (request.headers.get("host") or request.url.hostname or "").split(":")[0]
+    scheme = "wss" if request.url.scheme == "https" else "ws"
+    return f"{scheme}://{host}:{LIVEKIT_RTC_PORT}"
 
 TOKEN_TTL_SECONDS = 6 * 60 * 60  # long enough for one call session; not a durable credential
 
@@ -70,9 +86,8 @@ class SelectionRequest(BaseModel):
 
 
 @app.post("/api/token", response_model=TokenResponse)
-def issue_token(req: TokenRequest) -> TokenResponse:
-    if not LIVEKIT_PUBLIC_URL:
-        raise HTTPException(500, "LIVEKIT_PUBLIC_URL (or LIVEKIT_URL) is not configured")
+def issue_token(req: TokenRequest, request: Request) -> TokenResponse:
+    livekit_url = _livekit_url_for(request)
 
     # A fresh room per call by default — one caller per room, exactly like today's one-WS-
     # connection-per-caller model; a caller-supplied room name (not used by the current
@@ -88,7 +103,7 @@ def issue_token(req: TokenRequest) -> TokenResponse:
         .with_grants(grants)
         .to_jwt()
     )
-    return TokenResponse(token=token, url=LIVEKIT_PUBLIC_URL, room=room, identity=identity)
+    return TokenResponse(token=token, url=livekit_url, room=room, identity=identity)
 
 
 @app.get("/api/models")
