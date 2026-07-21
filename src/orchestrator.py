@@ -47,6 +47,20 @@ def find_entry(cfg: dict, category: str, entry_id: str) -> dict | None:
     return None
 
 
+def get_max_concurrent_calls() -> int:
+    """How many callers the confirmed STT backend can each get their own Whisper instance for —
+    the real VRAM-driven ceiling on concurrent calls (see config/models_config.json's stt entry).
+    Defaults to 1 (no concurrency) if nothing's confirmed yet or the entry omits the field, so an
+    unconfigured/misconfigured cap fails safe (rejects extra callers) rather than over-admits."""
+    if STATE.selection is None:
+        return 1
+    cfg = load_models_config()
+    entry = find_entry(cfg, "stt", STATE.selection.get("stt", ""))
+    if entry is None:
+        return 1
+    return int(entry.get("max_concurrent_calls", 1))
+
+
 @dataclass
 class BackendState:
     status: str = "pending"  # pending | loading | ready | error

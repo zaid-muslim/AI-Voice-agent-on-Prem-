@@ -270,16 +270,26 @@ async function startCall() {
 
   let token, url;
   try {
-    const resp = await fetch("/api/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{}",
-    });
-    if (!resp.ok) throw new Error(`token request failed: ${resp.status}`);
+    let resp;
+    try {
+      resp = await fetch("/api/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+    } catch (networkErr) {
+      throw new Error("Couldn't reach the token server: " + networkErr.message);
+    }
+    if (!resp.ok) {
+      // 503 = at the concurrent-call cap (see token_server.py's _active_call_count check) — its
+      // message ("Line is full...") is already user-facing, show it as-is, no extra framing.
+      const body = await resp.json().catch(() => ({}));
+      throw new Error(body.detail || `token request failed: ${resp.status}`);
+    }
     ({ token, url } = await resp.json());
   } catch (err) {
     console.error("Failed to get access token:", err);
-    showStartError("Couldn't reach the token server: " + err.message);
+    showStartError(err.message);
     startBtn.disabled = false;
     return;
   }

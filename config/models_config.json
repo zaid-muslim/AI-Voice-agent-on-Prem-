@@ -29,7 +29,8 @@
       "device_index": 0,
       "language": "en",
       "cuda_lib_dir": "/usr/local/lib/ollama/cuda_v12",
-      "startup_timeout_s": 90
+      "startup_timeout_s": 90,
+      "max_concurrent_calls": 3
     }
   ],
   "tts": [

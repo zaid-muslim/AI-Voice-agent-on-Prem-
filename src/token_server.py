@@ -26,6 +26,9 @@ load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
 LIVEKIT_API_KEY = os.environ["LIVEKIT_API_KEY"]
 LIVEKIT_API_SECRET = os.environ["LIVEKIT_API_SECRET"]
+# The server's OWN address for talking to LiveKit's admin API (room.list_rooms, for the capacity
+# check below) — distinct from LIVEKIT_PUBLIC_URL/_livekit_url_for, which is what browsers dial.
+LIVEKIT_URL = os.environ.get("LIVEKIT_URL", "ws://localhost:7880")
 # The LiveKit URL the *browser* dials for signaling+media. By default it's derived per-request
 # from the host the browser used to reach this token server (see _livekit_url_for) — so a LAN
 # client that loaded http://192.168.x.x:3000 gets ws://192.168.x.x:7880, and a tailnet client
@@ -48,6 +51,22 @@ def _livekit_url_for(request: Request) -> str:
     host = (request.headers.get("host") or request.url.hostname or "").split(":")[0]
     scheme = "wss" if request.url.scheme == "https" else "ws"
     return f"{scheme}://{host}:{LIVEKIT_RTC_PORT}"
+
+
+async def _active_call_count() -> int:
+    """Rooms with at least one participant, per LiveKit's own live room state — the single source
+    of truth for "how many calls are actually in progress", no local counter to keep in sync. A
+    room LiveKit hasn't cleaned up yet after everyone left has num_participants == 0 and doesn't
+    count. (Small accepted race: two /api/token requests arriving in the same instant could both
+    read the same pre-increment count and both be admitted, momentarily exceeding the cap by one —
+    not worth an atomic reservation scheme at this traffic scale; it self-corrects immediately.)"""
+    lk = api.LiveKitAPI(LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
+    try:
+        rooms = await lk.room.list_rooms(api.ListRoomsRequest())
+        return sum(1 for r in rooms.rooms if r.num_participants > 0)
+    finally:
+        await lk.aclose()
+
 
 TOKEN_TTL_SECONDS = 6 * 60 * 60  # long enough for one call session; not a durable credential
 
@@ -86,7 +105,16 @@ class SelectionRequest(BaseModel):
 
 
 @app.post("/api/token", response_model=TokenResponse)
-def issue_token(req: TokenRequest, request: Request) -> TokenResponse:
+async def issue_token(req: TokenRequest, request: Request) -> TokenResponse:
+    max_calls = orchestrator.get_max_concurrent_calls()
+    active = await _active_call_count()
+    if active >= max_calls:
+        # No queueing: caller sees "line is full" and can just click Start Call again whenever
+        # they want to retry — simpler than holding a room open with no agent dispatched to it.
+        raise HTTPException(
+            503, f"Line is full ({active}/{max_calls} calls active) — please try again shortly."
+        )
+
     livekit_url = _livekit_url_for(request)
 
     # A fresh room per call by default — one caller per room, exactly like today's one-WS-
