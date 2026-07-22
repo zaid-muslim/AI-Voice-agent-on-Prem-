@@ -28,7 +28,12 @@
       "device": "cuda",
       "device_index": 0,
       "language": "en",
+      "num_workers": 2,
       "cuda_lib_dir": "/usr/local/lib/ollama/cuda_v12",
+      "port": 8768,
+      "url_path": "/transcribe",
+      "log_file": "logs/whisper.log",
+      "readiness": { "type": "http", "path": "/health" },
       "startup_timeout_s": 90,
       "max_concurrent_calls": 3
     }

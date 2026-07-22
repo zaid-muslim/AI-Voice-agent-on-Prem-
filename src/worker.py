@@ -14,7 +14,6 @@ from datetime import datetime
 
 import aiohttp
 from dotenv import load_dotenv
-from faster_whisper import WhisperModel
 
 from livekit.agents import (
     Agent,
@@ -48,18 +47,18 @@ from whisper_stt import WhisperSTT
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
-# These three (plus the WHISPER_* block below) are fallback defaults only, for running this
-# file directly (debugging, bypassing the orchestrator). In normal operation, src/orchestrator.py
-# sets all of them as real environment variables on this process before it starts — load_dotenv()
-# defaults to override=False, so .env's values never clobber what the orchestrator already set,
-# they only apply when nothing else has.
+# These are fallback defaults only, for running this file directly (debugging, bypassing the
+# orchestrator). In normal operation, src/orchestrator.py sets all of them as real environment
+# variables on this process before it starts — load_dotenv() defaults to override=False, so .env's
+# values never clobber what the orchestrator already set, they only apply when nothing else has.
 VLLM_URL = os.environ.get("VLLM_URL", "http://localhost:8000/v1")
 VLLM_MODEL = os.environ.get("VLLM_MODEL", "qwen2.5-14b-awq")
 CHATTERBOX_URL = os.environ.get("CHATTERBOX_URL", "http://localhost:8766/synthesize")
-WHISPER_MODEL_SIZE = os.environ.get("WHISPER_MODEL_SIZE", "large-v3")
-WHISPER_COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "int8_float16")
-WHISPER_DEVICE = os.environ.get("WHISPER_DEVICE", "cuda")
-WHISPER_DEVICE_INDEX = int(os.environ.get("WHISPER_DEVICE_INDEX", "0"))
+# STT is now a shared HTTP microservice (src/whisper_server.py), not a per-process model — the
+# job-executor process holds no Whisper at all (that per-call GPU copy is what OOM'd the 2nd
+# concurrent caller). Only the service URL + language live here; the model size/compute/device
+# settings live on the whisper *service*, set from config/models_config.json's stt entry.
+WHISPER_URL = os.environ.get("WHISPER_URL", "http://localhost:8768/transcribe")
 WHISPER_LANGUAGE = os.environ.get("WHISPER_LANGUAGE", "en")
 SEARXNG_URL = "http://localhost:1234/search"
 WEB_SEARCH_RESULT_COUNT = 4
@@ -540,17 +539,15 @@ def prewarm(proc: JobProcess):
     # even though prewarm itself already finished, making the worker look hung when it isn't.
     print("Loading Silero VAD...", flush=True)
     proc.userdata["vad"] = silero.VAD.load()
-    print(f"Loading faster-whisper ({WHISPER_MODEL_SIZE}, {WHISPER_DEVICE} {WHISPER_COMPUTE_TYPE})...", flush=True)
-    proc.userdata["whisper_model"] = WhisperModel(
-        WHISPER_MODEL_SIZE, compute_type=WHISPER_COMPUTE_TYPE,
-        device=WHISPER_DEVICE, device_index=WHISPER_DEVICE_INDEX,
-    )
+    # No Whisper load here anymore: STT is a shared microservice (src/whisper_server.py) reached
+    # over HTTP at call time, so this per-call job process holds no GPU STT model. That per-process
+    # Whisper copy was what exhausted the GPU on the 2nd concurrent caller.
     print("Loading RAG embedding index...", flush=True)
     rag.init(DB_CONN)
     rag.warmup()
-    # src/orchestrator.py greps the worker's log for this exact string as the readiness signal
-    # for the whole worker subprocess (the "stt" category in the model-selection UI) — don't
-    # reword it without updating _launch_worker() there too.
+    # src/orchestrator.py greps the worker's log for this exact string as the worker subprocess's
+    # readiness signal (gating overall phase="ready", separate from the stt/whisper-service row) —
+    # don't reword it without updating _launch_worker() there too.
     print("Prewarm complete.", flush=True)
 
 
@@ -561,7 +558,7 @@ async def entrypoint(ctx: JobContext):
 
     session = AgentSession(
         vad=ctx.proc.userdata["vad"],
-        stt=WhisperSTT(model=ctx.proc.userdata["whisper_model"], language=WHISPER_LANGUAGE),
+        stt=WhisperSTT(url=WHISPER_URL, language=WHISPER_LANGUAGE),
         llm=openai.LLM(model=VLLM_MODEL, base_url=VLLM_URL, api_key="not-needed"),
         tts=ChatterboxTTS(url=CHATTERBOX_URL),
         userdata={"failed_card_attempts": 0},
@@ -633,12 +630,12 @@ if __name__ == "__main__":
         WorkerOptions(
             entrypoint_fnc=entrypoint,
             prewarm_fnc=prewarm,
-            # Production mode's default (min(cpu_count, 4)) prewarms that many processes
-            # concurrently, each loading its own full Whisper model onto the GPU — OOMs
-            # immediately alongside vLLM's own GPU budget. Today's GPU sizing (vLLM
-            # gpu_memory_utilization=0.5, int8 Whisper, Chatterbox) assumes exactly one
-            # active call at a time (see migration plan's concurrency section) — revisit
-            # once the Phase 3 replica-pool design lands.
+            # Now that STT is a shared microservice (whisper_server.py), a job process no longer
+            # loads a Whisper onto the GPU — prewarm is just Silero VAD (CPU) + the RAG index
+            # (~2GB RAM/process, no GPU). So concurrent calls no longer OOM the GPU; extra warm
+            # processes cost host RAM, not VRAM. Kept at 1 warm process for now (LiveKit spawns
+            # more on demand as calls arrive); can be raised to pre-warm more once the shared
+            # services' real concurrency ceiling is measured under load.
             num_idle_processes=1,
         )
     )

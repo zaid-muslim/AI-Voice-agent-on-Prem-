@@ -48,10 +48,12 @@ def find_entry(cfg: dict, category: str, entry_id: str) -> dict | None:
 
 
 def get_max_concurrent_calls() -> int:
-    """How many callers the confirmed STT backend can each get their own Whisper instance for —
-    the real VRAM-driven ceiling on concurrent calls (see config/models_config.json's stt entry).
-    Defaults to 1 (no concurrency) if nothing's confirmed yet or the entry omits the field, so an
-    unconfigured/misconfigured cap fails safe (rejects extra callers) rather than over-admits."""
+    """Concurrent-call admission ceiling, read from the confirmed STT entry's max_concurrent_calls
+    (see config/models_config.json). Since STT is now a shared microservice (not a per-call model),
+    this is the shared services' throughput ceiling rather than "how many Whisper copies fit in
+    VRAM" — set it from real load-testing. Defaults to 1 if nothing's confirmed yet or the entry
+    omits the field, so an unconfigured/misconfigured cap fails safe (rejects) rather than
+    over-admits."""
     if STATE.selection is None:
         return 1
     cfg = load_models_config()
@@ -108,18 +110,17 @@ async def start_selection(selection: dict) -> None:
 async def _run(llm_entry: dict, stt_entry: dict, tts_entry: dict) -> None:
     LOGS_DIR.mkdir(exist_ok=True)
     try:
-        # Safe to launch concurrently: worker.py's prewarm() (Whisper/VAD) has no dependency on
-        # vLLM/Chatterbox being up, and the frontend never reveals "Start Call" until phase ==
-        # "ready" (all three green) — so no real call can reach entrypoint() before vLLM/
-        # Chatterbox are actually ready, regardless of launch order.
-        #
-        # Sequential, not parallel: confirmed in practice on this box that concurrent CUDA init
-        # (vLLM loading a 14B model at the same time as faster-whisper's own CUDA context/model
-        # load) starves the worker's prewarm badly enough to blow past its startup_timeout_s —
-        # worker.log showed "Prewarm complete." eventually, just way past 90s. Loading one at a
-        # time avoids the GPU/PCIe contention; the total wall-clock cost is the sum instead of
-        # the max, but that's the safer trade on this hardware.
+        # Sequential, not parallel: concurrent CUDA init on this box (vLLM loading a 14B model at
+        # the same time as the whisper service's own CUDA context/model load) contends badly on
+        # the GPU/PCIe — proven in practice to blow past startup_timeout_s. Load one at a time;
+        # total wall-clock is the sum instead of the max, but it's the safer trade on this
+        # hardware. Order: the three UI-backed services (llm/stt/tts), each flipping its own
+        # backend row to "ready", then the worker last (no UI row — its "Prewarm complete." gates
+        # overall phase="ready"). The worker's prewarm (Silero VAD + RAG index, no GPU) has no
+        # dependency on the services being up, and the frontend never reveals "Start Call" until
+        # phase == "ready", so no real call reaches entrypoint() before every service is reachable.
         await _launch_vllm(llm_entry)
+        await _launch_whisper(stt_entry)
         await _launch_chatterbox(tts_entry)
         await _launch_worker(llm_entry, stt_entry, tts_entry)
         STATE.phase = "ready"
@@ -217,6 +218,35 @@ async def _launch_vllm(entry: dict) -> None:
     STATE.backends["llm"] = BackendState("ready")
 
 
+async def _launch_whisper(entry: dict) -> None:
+    """Launch the shared faster-whisper STT microservice (src/whisper_server.py) and wait for its
+    HTTP /health. Owns the "stt" backend row (previously stood in for by the worker's prewarm).
+    The model settings go in as env vars — the service reads them at module scope."""
+    env = os.environ.copy()
+    env["WHISPER_MODEL_SIZE"] = entry["model_size"]
+    env["WHISPER_COMPUTE_TYPE"] = entry["compute_type"]
+    env["WHISPER_DEVICE"] = entry["device"]
+    env["WHISPER_DEVICE_INDEX"] = str(entry["device_index"])
+    env["WHISPER_LANGUAGE"] = entry["language"]
+    env["WHISPER_NUM_WORKERS"] = str(entry.get("num_workers", 2))
+    env["WHISPER_PORT"] = str(entry["port"])
+    # faster-whisper/CTranslate2 borrows a CUDA lib dir on this box (same as the old worker did).
+    if entry.get("cuda_lib_dir"):
+        env["LD_LIBRARY_PATH"] = os.pathsep.join(
+            [entry["cuda_lib_dir"], env.get("LD_LIBRARY_PATH", "")]
+        )
+
+    cmd = [str(VENV_PY), "-u", "src/whisper_server.py"]
+    log_path = PROJECT_ROOT / entry["log_file"]
+    proc = await _spawn(cmd, env, log_path)
+    STATE.procs["stt"] = proc
+    await _poll_until(
+        lambda: _http_ready(entry["port"], entry["readiness"]["path"]),
+        proc, log_path, entry.get("startup_timeout_s", 90), "Whisper service",
+    )
+    STATE.backends["stt"] = BackendState("ready")
+
+
 async def _launch_chatterbox(entry: dict) -> None:
     cmd = [entry["python_bin"], "-u", entry["script"]]
     log_path = PROJECT_ROOT / entry["log_file"]
@@ -230,32 +260,24 @@ async def _launch_chatterbox(entry: dict) -> None:
 
 
 async def _launch_worker(llm_entry: dict, stt_entry: dict, tts_entry: dict) -> None:
+    """Launch the LiveKit agent worker. It reaches the three services over HTTP (URLs below), so
+    its own readiness is just prewarm (Silero VAD + RAG index, no GPU model) — it has no UI
+    backend row of its own; "Prewarm complete." simply gates overall phase="ready" (set in _run)."""
     env = os.environ.copy()
     env["VLLM_URL"] = f"http://localhost:{llm_entry['port']}/v1"
     env["VLLM_MODEL"] = llm_entry["served_model_name"]
     env["CHATTERBOX_URL"] = f"http://localhost:{tts_entry['port']}{tts_entry['url_path']}"
-    env["WHISPER_MODEL_SIZE"] = stt_entry["model_size"]
-    env["WHISPER_COMPUTE_TYPE"] = stt_entry["compute_type"]
-    env["WHISPER_DEVICE"] = stt_entry["device"]
-    env["WHISPER_DEVICE_INDEX"] = str(stt_entry["device_index"])
+    env["WHISPER_URL"] = f"http://localhost:{stt_entry['port']}{stt_entry['url_path']}"
     env["WHISPER_LANGUAGE"] = stt_entry["language"]
-    if stt_entry.get("cuda_lib_dir"):
-        env["LD_LIBRARY_PATH"] = os.pathsep.join(
-            [stt_entry["cuda_lib_dir"], env.get("LD_LIBRARY_PATH", "")]
-        )
 
     cmd = [str(VENV_PY), "-u", "src/worker.py", "start"]
     log_path = LOGS_DIR / "worker.log"
     proc = await _spawn(cmd, env, log_path)
     STATE.procs["worker"] = proc
-    # This single check stands in for the whole worker subprocess's readiness (VAD + Whisper +
-    # RAG index all load in prewarm() before this string prints) — matches the "stt" category in
-    # the UI since that's the only category the worker process itself gates on loading.
     await _poll_until(
         lambda: _log_grep_ready(log_path, "Prewarm complete."),
         proc, log_path, stt_entry.get("startup_timeout_s", 90), "Agent worker",
     )
-    STATE.backends["stt"] = BackendState("ready")
 
 
 async def _kill_remaining() -> None:
@@ -268,7 +290,7 @@ async def shutdown_all() -> None:
     cleanup() trap. Terminates worker first so it deregisters from LiveKit cleanly before its
     backends (vLLM/Chatterbox) disappear out from under it. Signals whole process groups, not
     just the direct children, so vLLM's EngineCore (which holds the GPU) can't be orphaned."""
-    for name in ("worker", "tts", "llm"):
+    for name in ("worker", "tts", "stt", "llm"):
         proc = STATE.procs.get(name)
         if proc:
             _terminate_group(proc)
