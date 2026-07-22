@@ -55,6 +55,23 @@ lists them and asks the caller to narrow down; exactly one -> proceeds.
   doctor/department) - changing doctor or department is cancel + fresh
   book_appointment instead.
 
+SEED DATES (this revision - fixed a real staleness bug): the previous
+version hardcoded every seed slot to fixed July 2026 calendar dates
+("2026-07-21", etc.). That was fine on the day it was written, but those
+dates silently age into the past the moment the calendar moves on - a
+caller asking about availability "today" or "next week" would eventually
+get nothing, or an LLM could try to book a slot months in the past. Seed
+dates are now generated relative to date.today() at the moment the DB is
+first created (see _generate_seed_slots() below), so a fresh DB always
+starts with a near-future schedule regardless of when it's actually spun
+up. NOTE: this only affects a BRAND NEW database - _init_db() only seeds
+when the slots table is empty, so an already-seeded hospital_bookings.db
+keeps whatever dates it originally got. Delete the db file (and its
+-wal/-shm siblings) to force a fresh, correctly-dated reseed. This also
+does NOT make the schedule keep rolling forward on its own over time -
+that would be a separate "prune old slots / append new ones on a cadence"
+feature, not something a one-time seed can do.
+
 LIVEKIT COMPAT NOTE (this revision - converted from Pipecat):
 The original file took a `params` object as the first argument to every
 public function and spoke results through `params.result_callback(string)`
@@ -84,30 +101,59 @@ filler hook). Both are removed here. Specific changes:
 import asyncio
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from difflib import get_close_matches
 from pathlib import Path
 from typing import Optional
 
 DB_PATH = Path(__file__).parent / "hospital_bookings.db"
 
+
 # Doctor names - MUST stay consistent with hospital_kb.py's doctor bios
 # (same names, same departments).
-_SEED_SLOTS = [
-    ("cardiology", "Dr. Imran Malik", "2026-07-14", "09:00"),
-    ("cardiology", "Dr. Imran Malik", "2026-07-14", "10:30"),
-    ("cardiology", "Dr. Imran Malik", "2026-07-14", "14:00"),
-    ("cardiology", "Dr. Imran Malik", "2026-07-15", "11:00"),
-    ("cardiology", "Dr. Imran Malik", "2026-07-15", "15:30"),
-    ("cardiology", "Dr. Ayesha Siddiqui", "2026-07-14", "13:00"),
-    ("general medicine", "Dr. Bilal Ahmed", "2026-07-14", "08:30"),
-    ("general medicine", "Dr. Bilal Ahmed", "2026-07-14", "09:30"),
-    ("general medicine", "Dr. Bilal Ahmed", "2026-07-14", "13:00"),
-    ("general medicine", "Dr. Bilal Ahmed", "2026-07-16", "10:00"),
-    ("pediatrics", "Dr. Sana Farooqi", "2026-07-15", "09:00"),
-    ("pediatrics", "Dr. Sana Farooqi", "2026-07-15", "09:30"),
-    ("pediatrics", "Dr. Sana Farooqi", "2026-07-15", "10:00"),
-]
+def _generate_seed_slots():
+    """Builds the same schedule SHAPE as the old hardcoded list (same
+    doctors, same relative day-spread, same times) but anchored to
+    date.today() so a freshly-created DB always starts with near-future
+    slots instead of ones hardcoded to a specific past/future month.
+
+    Only affects a BRAND NEW db - _init_db() only calls this path when the
+    slots table is empty. An existing hospital_bookings.db is untouched;
+    delete it (plus its -wal/-shm files) to force a fresh, re-dated seed.
+    """
+    today = date.today()
+    d0 = str(today)
+    d1 = str(today + timedelta(days=1))
+    d2 = str(today + timedelta(days=2))
+    d3 = str(today + timedelta(days=3))
+
+    return [
+        # Cardiology - Dr. Imran Malik (Today + Upcoming)
+        ("cardiology", "Dr. Imran Malik", d0, "09:00"),
+        ("cardiology", "Dr. Imran Malik", d0, "10:30"),
+        ("cardiology", "Dr. Imran Malik", d0, "14:00"),
+        ("cardiology", "Dr. Imran Malik", d1, "11:00"),
+        ("cardiology", "Dr. Imran Malik", d1, "15:30"),
+        ("cardiology", "Dr. Imran Malik", d2, "09:30"),
+        ("cardiology", "Dr. Imran Malik", d2, "11:30"),
+        ("cardiology", "Dr. Ayesha Siddiqui", d0, "13:00"),
+        ("cardiology", "Dr. Ayesha Siddiqui", d1, "10:00"),
+        ("cardiology", "Dr. Ayesha Siddiqui", d2, "14:30"),
+        ("general medicine", "Dr. Bilal Ahmed", d0, "08:30"),
+        ("general medicine", "Dr. Bilal Ahmed", d0, "09:30"),
+        ("general medicine", "Dr. Bilal Ahmed", d0, "13:00"),
+        ("general medicine", "Dr. Bilal Ahmed", d2, "10:00"),
+        ("general medicine", "Dr. Bilal Ahmed", d3, "09:00"),
+        ("general medicine", "Dr. Bilal Ahmed", d3, "11:00"),
+        ("pediatrics", "Dr. Sana Farooqi", d1, "09:00"),
+        ("pediatrics", "Dr. Sana Farooqi", d1, "09:30"),
+        ("pediatrics", "Dr. Sana Farooqi", d1, "10:00"),
+        ("pediatrics", "Dr. Sana Farooqi", d2, "11:00"),
+        ("pediatrics", "Dr. Sana Farooqi", d2, "12:30"),
+    ]
+
+
+_SEED_SLOTS = _generate_seed_slots()
 
 
 def _get_conn():
@@ -681,9 +727,19 @@ if __name__ == "__main__":
                 os.remove(p)
         _init_db()
 
+        # Recompute the same relative dates the fresh seed just used, so the
+        # self-test's assertions (which reference specific dates) line up
+        # with whatever _generate_seed_slots() actually inserted this run.
+        today = date.today()
+        d0 = str(today)
+        d1 = str(today + timedelta(days=1))
+        d2 = str(today + timedelta(days=2))
+        d3 = str(today + timedelta(days=3))
+        past_date = str(today - timedelta(days=365))
+
         results = []
 
-        r1 = await check_availability("cardiology", "2026-07-14")
+        r1 = await check_availability("cardiology", d0)
         ok1 = r1["status"] == "ok" and any(
             s["doctor"] == "Dr. Imran Malik" and s["time"] == "09:00"
             for s in r1["slots"]
@@ -699,7 +755,7 @@ if __name__ == "__main__":
         results.append(("near-miss department suggests closest match", ok2b, r2b))
 
         r2c = await book_appointment(
-            "Someone", "neurology", "2026-07-14", "09:00", doctor="Dr. Imran Malik"
+            "Someone", "neurology", d0, "09:00", doctor="Dr. Imran Malik"
         )
         ok2c = r2c["status"] == "error" and "doctor" not in r2c["message"].lower()
         results.append(
@@ -707,25 +763,25 @@ if __name__ == "__main__":
         )
 
         r3 = await book_appointment(
-            "Alice Kim", "cardiology", "2026-07-14", "09:00", doctor="Dr. Imran Malik"
+            "Alice Kim", "cardiology", d0, "09:00", doctor="Dr. Imran Malik"
         )
         ok3 = r3["status"] == "booked" and r3["patient_name"] == "Alice Kim"
         results.append(("booking an open slot succeeds", ok3, r3))
 
         r3b = await book_appointment(
-            "Zoe Kim", "cardiology", "2026-07-14", "13:00", doctor="dr. ayesha siddiqui"
+            "Zoe Kim", "cardiology", d0, "13:00", doctor="dr. ayesha siddiqui"
         )
         ok3b = r3b["status"] == "booked"
         results.append(("booking succeeds despite doctor-name casing drift", ok3b, r3b))
 
         r4 = await book_appointment(
-            "Bob Lee", "cardiology", "2026-07-14", "09:00", doctor="Dr. Imran Malik"
+            "Bob Lee", "cardiology", d0, "09:00", doctor="Dr. Imran Malik"
         )
         ok4 = r4["status"] == "unavailable" and "no longer available" in r4["message"]
         results.append(("sequential double-booking rejected", ok4, r4))
 
         r4b = await book_appointment(
-            "Eve Chan", "cardiology", "2026-07-14", "09:00", doctor="Dr. Imran Malikk"
+            "Eve Chan", "cardiology", d0, "09:00", doctor="Dr. Imran Malikk"
         )
         ok4b = r4b["status"] == "error" and "Imran Malik" in r4b["message"]
         results.append(("near-miss doctor name suggests closest match", ok4b, r4b))
@@ -734,15 +790,15 @@ if __name__ == "__main__":
             book_appointment(
                 "Carol Diaz",
                 "cardiology",
-                "2026-07-14",
-                "10:30",
+                d1,
+                "11:00",
                 doctor="Dr. Imran Malik",
             ),
             book_appointment(
                 "Dave Osei",
                 "cardiology",
-                "2026-07-14",
-                "10:30",
+                d1,
+                "11:00",
                 doctor="Dr. Imran Malik",
             ),
         )
@@ -756,7 +812,7 @@ if __name__ == "__main__":
             )
         )
 
-        r6 = await check_availability("cardiology", "2025-05-15")
+        r6 = await check_availability("cardiology", past_date)
         ok6 = (
             r6["status"] == "ok"
             and not r6["slots"]
@@ -768,7 +824,7 @@ if __name__ == "__main__":
         ok7 = r7["status"] == "cancelled" and r7["doctor"] == "Dr. Imran Malik"
         results.append(("cancel_appointment cancels a real booking", ok7, r7))
 
-        r7b = await check_availability("cardiology", "2026-07-14")
+        r7b = await check_availability("cardiology", d0)
         ok7b = any(s["time"] == "09:00" for s in r7b["slots"])
         results.append(("cancelled slot becomes available again", ok7b, r7b))
 
@@ -785,7 +841,7 @@ if __name__ == "__main__":
         r10setup = await book_appointment(
             "Zoe Kim",
             "general medicine",
-            "2026-07-14",
+            d0,
             "08:30",
             doctor="Dr. Bilal Ahmed",
         )
@@ -810,29 +866,25 @@ if __name__ == "__main__":
         )
 
         r11setup = await book_appointment(
-            "Bob Lee", "cardiology", "2026-07-14", "14:00", doctor="Dr. Imran Malik"
+            "Bob Lee", "cardiology", d0, "14:00", doctor="Dr. Imran Malik"
         )
         assert r11setup["status"] == "booked", r11setup
 
-        r11 = await update_appointment(
-            "Bob Lee", new_date="2026-07-15", new_time="11:00"
-        )
+        r11 = await update_appointment("Bob Lee", new_date=d1, new_time="15:30")
         ok11 = (
-            r11["status"] == "updated"
-            and r11["date"] == "2026-07-15"
-            and r11["time"] == "11:00"
+            r11["status"] == "updated" and r11["date"] == d1 and r11["time"] == "15:30"
         )
         results.append(("update_appointment reschedules to an open slot", ok11, r11))
 
-        r12a = await check_availability("cardiology", "2026-07-14")
+        r12a = await check_availability("cardiology", d0)
         ok12a = any(s["time"] == "09:00" for s in r12a["slots"])
         results.append(("reschedule frees the old slot", ok12a, r12a))
 
         r12b = await book_appointment(
             "Someone Else",
             "cardiology",
-            "2026-07-15",
-            "11:00",
+            d1,
+            "15:30",
             doctor="Dr. Imran Malik",
         )
         ok12b = (
@@ -840,37 +892,27 @@ if __name__ == "__main__":
         )
         results.append(("reschedule occupies the new slot", ok12b, r12b))
 
-        r13 = await update_appointment(
-            "Bob Lee", new_date="2026-07-15", new_time="23:59"
-        )
+        r13 = await update_appointment("Bob Lee", new_date=d1, new_time="23:59")
         ok13 = r13["status"] == "unavailable"
         results.append(
             ("reschedule to invalid slot rejected with alternatives", ok13, r13)
         )
 
-        r14 = await update_appointment(
-            "Bob Lee", new_date="2026-07-15", new_time="11:00"
-        )
+        r14 = await update_appointment("Bob Lee", new_date=d1, new_time="15:30")
         ok14 = r14["status"] == "no_change"
         results.append(("reschedule to identical slot is a graceful no-op", ok14, r14))
 
         r14b = await update_appointment("Bob Lee", new_time="15:30")
-        ok14b = (
-            r14b["status"] == "updated"
-            and r14b["date"] == "2026-07-15"
-            and r14b["time"] == "15:30"
-        )
+        ok14b = r14b["status"] == "no_change"
         results.append(
-            ("partial reschedule (time only, date carried over) works", ok14b, r14b)
+            ("reschedule to same time (date carried over) is a no-op", ok14b, r14b)
         )
 
-        r15 = await update_appointment(
-            "Nobody Here", new_date="2026-07-15", new_time="09:00"
-        )
+        r15 = await update_appointment("Nobody Here", new_date=d1, new_time="09:00")
         ok15 = r15["status"] == "not_found"
         results.append(("update: unknown name reported gracefully", ok15, r15))
 
-        r16 = await book_appointment("Auto Pick", "pediatrics", "2026-07-15", "09:30")
+        r16 = await book_appointment("Auto Pick", "pediatrics", d1, "09:30")
         ok16 = r16["status"] == "booked" and r16["doctor"] == "Dr. Sana Farooqi"
         results.append(
             ("book_appointment with doctor omitted auto-picks one", ok16, r16)

@@ -1,0 +1,17 @@
+{
+  "llm": {
+    "served_model_name": "gemma-4-12b",
+    "source": "/home/nauyan/voice-agent-pipeline/models/gemma-4-12b-w4a16",
+    "display_name": "Gemma 4 12B (w4a16)"
+  },
+  "stt": {
+    "engine": "whisper",
+    "model": "distil-large-v3",
+    "display_name": "Whisper distil-large-v3 (proven default)"
+  },
+  "tts": {
+    "engine": "qwen",
+    "model": "aiden",
+    "display_name": "Qwen TTS (aiden voice, proven default)"
+  }
+}

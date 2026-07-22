@@ -51,6 +51,7 @@ TOP_K = 3
 _embedder = None
 _kb_embeddings = None
 _kb_texts = None
+_kb_entries = None  # snapshot of entries the vectors were built from
 
 
 def _try_load_embedder() -> bool:
@@ -58,20 +59,44 @@ def _try_load_embedder() -> bool:
     Also the hook compat.py's warm_rag() calls at startup, before the first
     real call is accepted, so the model doesn't lazy-load mid-conversation
     and blow through a function-call timeout."""
-    global _embedder, _kb_embeddings, _kb_texts
+    global _embedder, _kb_embeddings, _kb_texts, _kb_entries
     if _embedder is not None:
         return True
     try:
         from sentence_transformers import SentenceTransformer
 
         _embedder = SentenceTransformer("all-MiniLM-L6-v2")
-        _kb_texts = [f"{e['title']}. {e['text']}" for e in HOSPITAL_KB]
+        # Snapshot the entries we embed ALONGSIDE their vectors, so a later
+        # reload_kb() that reorders/resizes HOSPITAL_KB can never make the
+        # position indices in _semantic_search misalign with the vectors.
+        _kb_entries = list(HOSPITAL_KB)
+        _kb_texts = [f"{e['title']}. {e['text']}" for e in _kb_entries]
         _kb_embeddings = _embedder.encode(_kb_texts, normalize_embeddings=True)
         return True
     except Exception:
         _embedder = None
         _kb_embeddings = None
+        _kb_entries = None
         return False
+
+
+def reindex() -> bool:
+    """Re-embed the CURRENT HOSPITAL_KB from scratch. Call this AFTER
+    hospital_kb.save_kb() writes an admin edit, so semantic search reflects
+    the new/changed/removed entries immediately (for calls that start after
+    this returns). Returns True if the semantic backend re-embedded, False
+    if running on the keyword fallback (in which case there's nothing to
+    re-embed - the fallback always reads HOSPITAL_KB live). Safe to call
+    even if the embedder was never loaded."""
+    global _kb_embeddings, _kb_texts, _kb_entries
+    if _embedder is None:
+        # Either never loaded, or on keyword fallback. Try a fresh load so
+        # an admin save can be the thing that first warms it.
+        return _try_load_embedder()
+    _kb_entries = list(HOSPITAL_KB)
+    _kb_texts = [f"{e['title']}. {e['text']}" for e in _kb_entries]
+    _kb_embeddings = _embedder.encode(_kb_texts, normalize_embeddings=True)
+    return True
 
 
 def _semantic_search(query: str, k: int) -> List[Tuple[dict, float]]:
@@ -80,7 +105,10 @@ def _semantic_search(query: str, k: int) -> List[Tuple[dict, float]]:
     q_emb = _embedder.encode([query], normalize_embeddings=True)[0]
     scores = _kb_embeddings @ q_emb
     top_idx = np.argsort(-scores)[:k]
-    return [(HOSPITAL_KB[i], float(scores[i])) for i in top_idx]
+    # Index into _kb_entries (the snapshot the vectors were built from), NOT
+    # the live HOSPITAL_KB, so results always line up with their vectors
+    # even if HOSPITAL_KB was reloaded since the last reindex().
+    return [(_kb_entries[i], float(scores[i])) for i in top_idx]
 
 
 # --- fallback: keyword overlap (zero extra dependency) ---------------------

@@ -28,7 +28,7 @@ The doctor "doctors" category entries below are the source of truth; this
 function just reshapes them into {"name", "department", "bio"} dicts.
 """
 
-HOSPITAL_KB = [
+_HARDCODED_KB = [
     {
         "id": "hours_general",
         "category": "hours",
@@ -200,16 +200,101 @@ HOSPITAL_KB = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# EDITABLE DATA LOADING
+# ---------------------------------------------------------------------------
+# HOSPITAL_KB is now loaded from hospital_data.json (an editable file the
+# admin UI writes to) if that file exists, falling back to the hardcoded
+# _HARDCODED_KB above if it's missing or unreadable. This is what makes the
+# hospital data admin-editable at runtime WITHOUT touching Python code -
+# the admin UI writes the JSON, and reload_kb() re-reads it.
+#
+# WHY A MODULE-LEVEL list that gets reassigned, not a function: tons of
+# existing code (compat.py, rag.py) imports HOSPITAL_KB by name. Keeping it
+# a module-level list means none of that has to change - reload_kb() mutates
+# this same list object in place so even code holding a reference sees
+# updates.
+
+import json as _json
+from pathlib import Path as _Path
+
+_DATA_FILE = _Path(__file__).parent / "hospital_data.json"
+
+HOSPITAL_KB = []  # populated by _load_kb() immediately below
+
+
+def _load_kb() -> list:
+    """Read the editable JSON store; fall back to hardcoded data if it's
+    missing/corrupt so the system NEVER starts with no hospital data."""
+    if _DATA_FILE.exists():
+        try:
+            with open(_DATA_FILE, "r", encoding="utf-8") as f:
+                data = _json.load(f)
+            entries = data.get("entries", [])
+            if entries:
+                return entries
+        except (OSError, ValueError):
+            pass  # corrupt/unreadable -> fall through to hardcoded
+    return list(_HARDCODED_KB)
+
+
+def reload_kb() -> list:
+    """Re-read hospital_data.json and update HOSPITAL_KB IN PLACE (so any
+    code holding a reference to the list sees the new data). The admin UI /
+    rag.py call this after a save to pick up edits without a restart.
+    Returns the refreshed list."""
+    fresh = _load_kb()
+    HOSPITAL_KB.clear()
+    HOSPITAL_KB.extend(fresh)
+    return HOSPITAL_KB
+
+
+# populate at import time
+reload_kb()
+
+
 _REQUIRED_FIELDS = {"id", "category", "title", "text"}
 _MIN_TEXT_LEN = 20
 _MAX_TEXT_LEN = 400
 
 
-def _validate_kb():
+def save_kb(entries: list) -> list:
+    """Validate and write a new set of entries to hospital_data.json, then
+    reload HOSPITAL_KB in place. Raises ValueError with a human-readable
+    message if the data is invalid, so the admin UI can show the admin what
+    to fix instead of silently writing broken data. Returns the problems
+    list (empty = clean) after a successful write.
+
+    NOTE: this validates and SAVES, but does NOT itself re-embed RAG - the
+    caller (admin UI) is responsible for calling rag.reindex() afterward so
+    semantic search reflects the change. Kept separate so this module stays
+    free of the heavy sentence-transformers dependency."""
+    problems = _validate_entries(entries)
+    # Block only on STRUCTURAL problems (missing fields, duplicate ids) -
+    # length/consistency warnings are surfaced but don't block a save, since
+    # an admin mid-edit may legitimately have a short bio momentarily.
+    blocking = [p for p in problems if "missing fields" in p or "duplicate id" in p]
+    if blocking:
+        raise ValueError(
+            "Cannot save - fix these first:\n  - " + "\n  - ".join(blocking)
+        )
+
+    tmp = _DATA_FILE.with_suffix(".json.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        _json.dump({"entries": entries}, f, indent=2)
+    tmp.replace(_DATA_FILE)  # atomic swap - never leaves a half-written file
+    reload_kb()
+    return problems
+
+
+def _validate_entries(entries: list) -> list:
+    """Validate ANY candidate list of entries (used by save_kb before
+    writing, and by _validate_kb for the current data). Returns a list of
+    human-readable problem strings; empty means clean."""
     problems = []
     seen_ids = set()
 
-    for entry in HOSPITAL_KB:
+    for entry in entries:
         missing = _REQUIRED_FIELDS - entry.keys()
         if missing:
             problems.append(f"entry missing fields {missing}: {entry}")
@@ -229,10 +314,10 @@ def _validate_kb():
     # match a real doctor entry's title - this is exactly the class of bug
     # (Dr. Ali vs Dr. Nguyen) that slipped through before.
     dept_texts = " ".join(
-        e["text"] for e in HOSPITAL_KB if e["category"] == "departments"
+        e["text"] for e in entries if e.get("category") == "departments"
     )
-    for e in HOSPITAL_KB:
-        if e["category"] != "doctors":
+    for e in entries:
+        if e.get("category") != "doctors":
             continue
         name = e["title"].split(" - ")[0].replace("Dr. ", "").strip()
         if name not in dept_texts:
@@ -242,6 +327,12 @@ def _validate_kb():
             )
 
     return problems
+
+
+def _validate_kb():
+    """Validate the currently-loaded HOSPITAL_KB (thin wrapper kept for the
+    __main__ self-test below and any existing callers)."""
+    return _validate_entries(HOSPITAL_KB)
 
 
 def get_doctor_roster() -> list:

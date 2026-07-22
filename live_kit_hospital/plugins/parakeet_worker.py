@@ -49,6 +49,20 @@ def _log(msg: str) -> None:
     print(f"[parakeet_worker] {msg}", file=sys.stderr, flush=True)
 
 
+def _quiet_nemo_logging() -> None:
+    """NeMo's own internal logger is extremely chatty (full training/
+    validation config dumps, multiple redundant 'Using RNNT Loss' lines)
+    and was observed throwing its OWN internal BrokenPipeErrors while
+    trying to flush that volume of output under load. None of it is
+    needed for inference - silence it down to warnings only."""
+    try:
+        from nemo.utils import logging as nemo_logging
+
+        nemo_logging.setLevel("WARNING")
+    except Exception:  # noqa: BLE001
+        pass  # best-effort only; never let logging setup break the worker
+
+
 def main() -> None:
     model = None
     torch = None
@@ -69,6 +83,7 @@ def main() -> None:
             t0 = time.time()
             _log("loading nvidia/parakeet-tdt-0.6b-v2 ...")
             try:
+                _quiet_nemo_logging()
                 import nemo.collections.asr as nemo_asr
                 import torch as _torch
 

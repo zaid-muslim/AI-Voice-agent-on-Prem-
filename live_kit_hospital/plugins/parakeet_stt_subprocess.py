@@ -37,6 +37,7 @@ import asyncio
 import base64
 import json
 import os
+import threading
 import uuid
 
 import numpy as np
@@ -70,18 +71,70 @@ class ParakeetSubprocessSTT(stt.STT):
         self._worker_script = worker_script or os.environ["PARAKEET_WORKER"]
         self._language = language
         self._process: asyncio.subprocess.Process | None = None
+        self._stderr_task: asyncio.Task | None = None
         self._spawn_lock = asyncio.Lock()
         # One transcription in flight at a time - mirrors the single-lane
         # executor in the in-process plugin, no GPU contention spikes
         # against vLLM mid-turn.
         self._call_lock = asyncio.Lock()
 
+        # DEDICATED BACKGROUND EVENT LOOP - this is the actual fix for a
+        # real bug: load() is called synchronously from prewarm(proc),
+        # which has NO running event loop yet. The tempting fix is
+        # asyncio.run(self._ensure_started()) - but asyncio.run() creates
+        # a throwaway loop, runs the coroutine, then DESTROYS that loop
+        # when done. The subprocess transport it creates stays alive as an
+        # object, but is permanently bound to that now-dead loop. The
+        # first real call later - on LiveKit's actual session event loop,
+        # a totally different loop - then fails with "Event loop is
+        # closed" the moment it tries to write to that orphaned
+        # transport. The fix: run ONE persistent loop, forever, in its own
+        # background thread, created once and never torn down for the
+        # life of this object. Every operation on self._process - spawn,
+        # write, read, cleanup - is dispatched onto THIS loop via
+        # run_coroutine_threadsafe, regardless of which loop the caller
+        # (prewarm's throwaway context, or the real session loop) happens
+        # to be running on.
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._loop_thread: threading.Thread | None = None
+        self._loop_start_lock = threading.Lock()  # plain thread lock -
+        # _ensure_loop() may be called before any event loop exists at all
+
+    def _ensure_loop(self) -> asyncio.AbstractEventLoop:
+        """Start the dedicated background loop/thread once, idempotently.
+        Safe to call from prewarm's sync context or from async code on any
+        other loop - this never touches the CALLER's loop, only ever
+        creates/returns our own private one."""
+        if self._loop is not None:
+            return self._loop
+        with self._loop_start_lock:
+            if self._loop is not None:
+                return self._loop
+            self._loop = asyncio.new_event_loop()
+
+            def _run_forever(loop: asyncio.AbstractEventLoop) -> None:
+                asyncio.set_event_loop(loop)
+                loop.run_forever()
+
+            self._loop_thread = threading.Thread(
+                target=_run_forever,
+                args=(self._loop,),
+                daemon=True,
+                name="parakeet-subprocess-loop",
+            )
+            self._loop_thread.start()
+            return self._loop
+
     # ------------------------------------------------------------ lifecycle
     def load(self) -> None:
-        """Called synchronously from prewarm(proc) in agent.py. Spawning a
-        subprocess needs a running event loop, so this just runs the async
-        spawn+init to completion before prewarm returns."""
-        asyncio.run(self._ensure_started())
+        """Called synchronously from prewarm(proc) in agent.py - no event
+        loop is running yet at this point. Ensure our persistent
+        background loop exists, then submit the real async spawn+init work
+        to it and block (via .result()) until that finishes, so prewarm()
+        still doesn't return until Parakeet is genuinely warm."""
+        loop = self._ensure_loop()
+        future = asyncio.run_coroutine_threadsafe(self._ensure_started(), loop)
+        future.result(timeout=WORKER_INIT_TIMEOUT_SECS + 30)
 
     def _process_alive(self) -> bool:
         return self._process is not None and self._process.returncode is None
@@ -100,10 +153,21 @@ class ParakeetSubprocessSTT(stt.STT):
                 self._worker_script,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=None,  # inherit - worker's load progress/errors show
-                # up directly in the main agent's logs
+                # NEVER inherit stderr here (stderr=None used to mean
+                # exactly that). The LiveKit job process that calls this
+                # is itself using ITS OWN stdio as an internal IPC channel
+                # back to the main worker process - if our subprocess
+                # shares that same fd, NeMo's chatty internal logging
+                # (which itself throws BrokenPipeErrors under load) writes
+                # directly into LiveKit's own message stream and corrupts
+                # it, surfacing as a confusing "Expecting value" JSON
+                # decode error on LiveKit's side, nowhere near the real
+                # cause. A fully separate pipe, drained by us below,
+                # isolates this subprocess's IO completely.
+                stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,  # Ctrl+C isolation - see module docstring
             )
+            self._stderr_task = asyncio.create_task(self._drain_stderr())
             self._process.stdin.write((json.dumps({"action": "init"}) + "\n").encode())
             await self._process.stdin.drain()
             try:
@@ -132,7 +196,27 @@ class ParakeetSubprocessSTT(stt.STT):
                 )
             logger.info("ParakeetSubprocessSTT: worker ready (warm).")
 
+    async def _drain_stderr(self) -> None:
+        """Continuously read the worker's stderr (NeMo's load progress,
+        warnings, tracebacks) and forward it through OUR OWN logger, on our
+        own separately-piped fd - never the parent's inherited stream. This
+        is what makes it safe to pipe stderr instead of inheriting it: we
+        still see everything the worker prints, just without any risk of
+        it colliding with LiveKit's own internal IPC."""
+        if self._process is None or self._process.stderr is None:
+            return
+        try:
+            async for line in self._process.stderr:
+                text = line.decode("utf-8", errors="replace").rstrip()
+                if text:
+                    logger.debug(f"[parakeet_worker stderr] {text}")
+        except (asyncio.CancelledError, ValueError):
+            pass  # normal on shutdown/respawn
+
     async def _cleanup_process(self) -> None:
+        if self._stderr_task is not None:
+            self._stderr_task.cancel()
+            self._stderr_task = None
         if self._process and self._process.returncode is None:
             self._process.kill()
             try:
@@ -168,6 +252,25 @@ class ParakeetSubprocessSTT(stt.STT):
         language: str | None = None,
         conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS,
     ) -> stt.SpeechEvent:
+        """Runs on WHATEVER loop LiveKit's session is using. Don't touch
+        self._process directly here - dispatch the real work onto our
+        dedicated background loop (same one load() used), and bridge its
+        result back to this loop with asyncio.wrap_future(). This is what
+        actually fixes the "Event loop is closed" crash: self._process is
+        now only ever read/written from the ONE loop it was created on."""
+        loop = self._ensure_loop()
+        future = asyncio.run_coroutine_threadsafe(
+            self._do_recognize(buffer, language), loop
+        )
+        return await asyncio.wrap_future(future)
+
+    async def _do_recognize(
+        self, buffer: utils.AudioBuffer, language: str | None
+    ) -> stt.SpeechEvent:
+        """The actual transcription request/response - always executed on
+        our dedicated background loop (see _recognize_impl above), so
+        self._process is always accessed from the same loop it was
+        created on."""
         await self._ensure_started()
         audio = self._buffer_to_float32(buffer)
         audio_b64 = base64.b64encode(audio.tobytes()).decode()

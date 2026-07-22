@@ -87,7 +87,8 @@ class QwenSubprocessTTS(tts.TTS):
             "/home/nauyan/voice-agent-pipeline/src_2/services/qwen_worker.py",
         )
         self._model_id = model_id or os.environ.get(
-            "QWEN_MODEL_ID", "/home/nauyan/voice-agent-pipeline/models/Qwentts"
+            "QWEN_MODEL_ID",
+            "/home/nauyan/voice-agent-pipeline/models/Qwen3-TTS-0.6B-custom",
         )
         self._speaker = os.environ.get("QWEN_SPEAKER", speaker)
         self._language = os.environ.get("QWEN_LANGUAGE", language)

@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Riverside General — Dev Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --desk: #2E5E8C; --ink: #1a2230; --ink-soft: #55617a;
+    --paper: #f4f5f7; --card: #ffffff; --line: #dfe3ea; --line-strong: #c4cad6;
+    --ok: #1F7A5C; --warn: #D9930D; --err: #C0392F;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--paper); color:var(--ink); font-family:"Archivo",sans-serif; font-size:15px; line-height:1.5; }
+  header { background:var(--card); border-bottom:2px solid var(--line-strong); padding:18px 28px; display:flex; justify-content:space-between; align-items:center; }
+  header .brand { font-weight:800; font-size:18px; letter-spacing:-0.01em; }
+  header .brand span { color:var(--desk); }
+  header .sub { font-family:"IBM Plex Mono",monospace; font-size:12px; color:var(--ink-soft); text-transform:uppercase; letter-spacing:0.08em; margin-top:2px; }
+  nav { display:flex; gap:4px; }
+  nav button { background:none; border:none; padding:8px 14px; font-family:"Archivo",sans-serif; font-weight:600; font-size:13.5px; color:var(--ink-soft); cursor:pointer; border-radius:7px; }
+  nav button.active { background:var(--desk); color:#fff; }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 28px; }
+  .tab { display:none; }
+  .tab.active { display:block; }
+  .card { background:var(--card); border:1.5px solid var(--line); border-radius:14px; padding:22px 24px; margin-bottom:22px; }
+  .card h2 { margin:0 0 4px; font-size:16px; }
+  .card .desc { color:var(--ink-soft); font-size:13.5px; margin:0 0 16px; }
+  .row { display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; }
+  .field { display:flex; flex-direction:column; gap:5px; flex:1; min-width:200px; }
+  .field label { font-size:11px; font-family:"IBM Plex Mono",monospace; text-transform:uppercase; letter-spacing:0.07em; color:var(--ink-soft); }
+  select, input { font-family:"Archivo",sans-serif; font-size:14.5px; border:1.5px solid var(--line-strong); border-radius:8px; padding:9px 11px; background:#fcfcfd; width:100%; }
+  select:focus, input:focus { outline:none; border-color:var(--desk); box-shadow:0 0 0 3px rgba(46,94,140,0.12); }
+  button.action { font-family:"Archivo",sans-serif; font-weight:600; font-size:14px; border:1.5px solid var(--desk); background:var(--desk); color:#fff; padding:9px 18px; border-radius:8px; cursor:pointer; white-space:nowrap; }
+  button.action:hover { filter:brightness(1.08); }
+  button.action:disabled { opacity:0.5; cursor:not-allowed; }
+  button.action.secondary { background:var(--card); color:var(--ink); border-color:var(--line-strong); }
+  .badge { display:inline-block; font-family:"IBM Plex Mono",monospace; font-size:10.5px; text-transform:uppercase; letter-spacing:0.06em; padding:2px 7px; border-radius:5px; margin-left:6px; }
+  .badge.verified { background:#e7f4ef; color:var(--ok); }
+  .badge.candidate { background:#fbf1dd; color:var(--warn); }
+  .license-note { font-size:12px; color:var(--ink-soft); margin-top:8px; padding:8px 10px; background:#f7f8fa; border-radius:7px; line-height:1.5; }
+  .license-note.gpl { background:#fbf1dd; color:#6b4906; }
+  .status-line { display:flex; align-items:center; gap:10px; margin-top:14px; padding:10px 14px; border-radius:9px; background:#f7f8fa; font-size:13.5px; }
+  .status-line.ok { background:#e7f4ef; color:#12503b; }
+  .status-line.err { background:#fbeceb; color:#7a231b; }
+  .status-line.busy { background:#fbf1dd; color:#6b4906; }
+  .dot { width:9px; height:9px; border-radius:50%; background:var(--ink-soft); flex-shrink:0; }
+  .dot.ok { background:var(--ok); }
+  .dot.err { background:var(--err); }
+  .dot.busy { background:var(--warn); animation:pulse 1s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+  .current { font-family:"IBM Plex Mono",monospace; font-size:12.5px; color:var(--desk); background:#eef4fa; padding:8px 12px; border-radius:8px; margin-bottom:14px; word-break:break-all; }
+  .warn-box { background:#fbf1dd; border:1.5px solid var(--warn); border-radius:9px; padding:12px 14px; font-size:13px; color:#6b4906; margin-bottom:16px; }
+
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th { text-align:left; font-family:"IBM Plex Mono",monospace; font-size:10.5px; text-transform:uppercase; letter-spacing:0.06em; color:var(--ink-soft); padding:8px 10px; border-bottom:2px solid var(--line-strong); }
+  td { padding:9px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  .combo-cell { font-family:"IBM Plex Mono",monospace; font-size:11.5px; line-height:1.6; }
+  .metric-cell { font-family:"IBM Plex Mono",monospace; }
+  .empty-state { padding:30px; text-align:center; color:var(--ink-soft); font-size:13.5px; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <div class="brand">Riverside <span>General</span> — Dev Console</div>
+    <div class="sub">Model &amp; Backend Selection</div>
+  </div>
+  <nav>
+    <button class="tab-btn active" data-tab="models">Models</button>
+    <button class="tab-btn" data-tab="latency">Latency Comparison</button>
+  </nav>
+</header>
+
+<div class="wrap">
+
+  <!-- ============ MODELS TAB ============ -->
+  <div class="tab active" id="tab-models">
+
+    <div class="card">
+      <h2>Language model (LLM)</h2>
+      <p class="desc">Switching restarts the shared vLLM process — NOT instant. Expect a real outage while the old model stops and the new one loads (15–60+ seconds; longer for a first-time download).</p>
+      <div class="current" id="llmCurrent">Loading…</div>
+      <div class="row">
+        <div class="field">
+          <label>Model</label>
+          <select id="llmSelect"></select>
+        </div>
+        <div class="field" id="customSourceField" style="display:none">
+          <label>Source (local path or HF repo id)</label>
+          <input id="customSource" placeholder="e.g. Qwen/Qwen2.5-7B-Instruct" />
+        </div>
+        <div class="field" id="customNameField" style="display:none">
+          <label>Served name</label>
+          <input id="customServedName" placeholder="e.g. qwen-7b" />
+        </div>
+        <button class="action" id="switchLlmBtn">Switch model</button>
+      </div>
+      <div class="license-note" id="llmLicenseNote"></div>
+      <div class="status-line" id="llmStatus"><span class="dot"></span><span>—</span></div>
+    </div>
+
+    <div class="card">
+      <h2>Text-to-speech (TTS)</h2>
+      <p class="desc">Takes effect on the next call. No restart needed.</p>
+      <div class="current" id="ttsCurrent"></div>
+      <div class="row">
+        <div class="field">
+          <label>Engine + voice</label>
+          <select id="ttsSelect"></select>
+        </div>
+        <button class="action" id="saveTtsBtn">Save</button>
+      </div>
+      <div class="license-note" id="ttsLicenseNote"></div>
+      <div class="status-line" id="ttsStatus" style="display:none"><span class="dot"></span><span></span></div>
+    </div>
+
+    <div class="card">
+      <h2>Speech-to-text (STT)</h2>
+      <p class="desc">Takes effect for the next newly-spawned worker process. An already-warmed process keeps its current STT until recycled.</p>
+      <div class="current" id="sttCurrent"></div>
+      <div class="row">
+        <div class="field">
+          <label>Engine + model</label>
+          <select id="sttSelect"></select>
+        </div>
+        <button class="action" id="saveSttBtn">Save</button>
+      </div>
+      <div class="license-note" id="sttLicenseNote"></div>
+      <div class="status-line" id="sttStatus" style="display:none"><span class="dot"></span><span></span></div>
+    </div>
+
+  </div>
+
+  <!-- ============ LATENCY TAB ============ -->
+  <div class="tab" id="tab-latency">
+    <div class="card">
+      <h2>Latency by combination</h2>
+      <p class="desc">Real per-turn measurements from actual calls, grouped by which LLM/STT/TTS combination was active. Averages update as you make more calls with each combination — this is measured data, not a benchmark claim. Switch combinations from the Models tab, make a few test calls, then compare here.</p>
+      <div class="row" style="margin-bottom:16px">
+        <button class="action secondary" id="refreshLatencyBtn">Refresh</button>
+        <button class="action secondary" id="clearLatencyBtn">Clear all data</button>
+      </div>
+      <div id="latencyTableWrap"></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  let registry = null;
+  let pollTimer = null;
+
+  document.querySelectorAll(".tab-btn").forEach(btn => {
+    btn.onclick = () => {
+      document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+      document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+      btn.classList.add("active");
+      $("tab-" + btn.dataset.tab).classList.add("active");
+      if (btn.dataset.tab === "latency") loadLatency();
+    };
+  });
+
+  async function api(path, opts = {}) {
+    const res = await fetch(path, opts);
+    if (res.status === 401) throw new Error("Wrong password — reload to try again.");
+    if (!res.ok) {
+      let detail = `HTTP ${res.status}`;
+      try { detail = (await res.json()).detail || detail; } catch (e) {}
+      throw new Error(detail);
+    }
+    return res.json();
+  }
+
+  function setStatusLine(el, dotClass, text) {
+    el.className = "status-line" + (dotClass ? " " + dotClass : "");
+    el.querySelector(".dot").className = "dot " + dotClass;
+    el.querySelector("span:last-child").textContent = text;
+    el.style.display = "flex";
+  }
+
+  function badge(status) {
+    return `<span class="badge ${status}">${status}</span>`;
+  }
+
+  function licenseNote(entry) {
+    const isGpl = (entry.license || "").toLowerCase().includes("gpl");
+    return `<div class="license-note${isGpl ? " gpl" : ""}">${badge(entry.status)} <strong>License: ${entry.license || "unknown"}</strong><br>${entry.note || ""}</div>`;
+  }
+
+  async function loadAll() {
+    registry = await api("/api/registry");
+    await refreshConfig();
+
+    const llmSel = $("llmSelect");
+    llmSel.innerHTML = registry.llm_models.map(m =>
+      `<option value="${m.served_model_name}">${m.display_name}${m.status === "candidate" ? " ⚠" : ""}</option>`
+    ).join("");
+    llmSel.onchange = () => {
+      const chosen = registry.llm_models.find(m => m.served_model_name === llmSel.value);
+      const isCustom = chosen && chosen.served_model_name === "custom";
+      $("customSourceField").style.display = isCustom ? "flex" : "none";
+      $("customNameField").style.display = isCustom ? "flex" : "none";
+      $("llmLicenseNote").innerHTML = chosen ? licenseNote(chosen) : "";
+    };
+    llmSel.dispatchEvent(new Event("change"));
+
+    const ttsSel = $("ttsSelect");
+    ttsSel.innerHTML = registry.tts_backends.map(b =>
+      `<option value="${b.id}">${b.display_name}${b.status === "candidate" ? " ⚠" : ""}</option>`
+    ).join("");
+    ttsSel.onchange = () => {
+      const chosen = registry.tts_backends.find(b => b.id === ttsSel.value);
+      $("ttsLicenseNote").innerHTML = chosen ? licenseNote(chosen) : "";
+    };
+    ttsSel.dispatchEvent(new Event("change"));
+
+    const sttSel = $("sttSelect");
+    sttSel.innerHTML = registry.stt_backends.map(b =>
+      `<option value="${b.id}">${b.display_name}${b.status === "candidate" ? " ⚠" : ""}</option>`
+    ).join("");
+    sttSel.onchange = () => {
+      const chosen = registry.stt_backends.find(b => b.id === sttSel.value);
+      $("sttLicenseNote").innerHTML = chosen ? licenseNote(chosen) : "";
+    };
+    sttSel.dispatchEvent(new Event("change"));
+  }
+
+  async function refreshConfig() {
+    const cfg = await api("/api/config");
+    $("llmCurrent").textContent = `Currently serving: ${cfg.llm.display_name} (${cfg.llm.served_model_name})`;
+    $("ttsCurrent").textContent = `Current: ${cfg.tts.engine} — ${cfg.tts.model}`;
+    $("sttCurrent").textContent = `Current: ${cfg.stt.engine} — ${cfg.stt.model}`;
+    renderLlmStatus(cfg._vllm_status);
+    return cfg;
+  }
+
+  function renderLlmStatus(s) {
+    if (!s || s.state === "IDLE") {
+      setStatusLine($("llmStatus"), "", "Not started yet (dev server hasn't launched vLLM this session).");
+    } else if (s.state === "HEALTHY") {
+      setStatusLine($("llmStatus"), "ok", `Healthy — serving '${s.current_served_name}'.`);
+    } else if (s.state === "FAILED") {
+      setStatusLine($("llmStatus"), "err", s.detail);
+    } else {
+      setStatusLine($("llmStatus"), "busy", s.detail || `${s.state}…`);
+    }
+  }
+
+  $("switchLlmBtn").onclick = async () => {
+    const llmSel = $("llmSelect");
+    const chosen = registry.llm_models.find(m => m.served_model_name === llmSel.value);
+    const isCustom = chosen && chosen.served_model_name === "custom";
+    const source = isCustom ? $("customSource").value.trim() : chosen.source;
+    const servedName = isCustom ? $("customServedName").value.trim() : chosen.served_model_name;
+    const displayName = isCustom ? (servedName || "custom model") : chosen.display_name;
+
+    if (!source || !servedName) {
+      setStatusLine($("llmStatus"), "err", "Enter both a source and a served name for a custom model.");
+      return;
+    }
+    if (!confirm(`Switch to "${displayName}"? This will restart vLLM and briefly interrupt any active calls' LLM access.`)) return;
+
+    $("switchLlmBtn").disabled = true;
+    setStatusLine($("llmStatus"), "busy", "Starting switch…");
+    try {
+      await api("/api/llm/switch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source, served_model_name: servedName, display_name: displayName }),
+      });
+      startPolling();
+    } catch (e) {
+      setStatusLine($("llmStatus"), "err", e.message);
+      $("switchLlmBtn").disabled = false;
+    }
+  };
+
+  function startPolling() {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(async () => {
+      try {
+        const s = await api("/api/llm/status");
+        renderLlmStatus(s);
+        if (!s.switching) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+          $("switchLlmBtn").disabled = false;
+          await refreshConfig();
+        }
+      } catch (e) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+        $("switchLlmBtn").disabled = false;
+        setStatusLine($("llmStatus"), "err", e.message);
+      }
+    }, 2000);
+  }
+
+  $("saveTtsBtn").onclick = async () => {
+    const chosen = registry.tts_backends.find(b => b.id === $("ttsSelect").value);
+    $("saveTtsBtn").disabled = true;
+    try {
+      const res = await api("/api/tts", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ engine: chosen.engine, model: chosen.model, display_name: chosen.display_name }),
+      });
+      setStatusLine($("ttsStatus"), "ok", res.note);
+      await refreshConfig();
+    } catch (e) {
+      setStatusLine($("ttsStatus"), "err", e.message);
+    }
+    $("saveTtsBtn").disabled = false;
+  };
+
+  $("saveSttBtn").onclick = async () => {
+    const chosen = registry.stt_backends.find(b => b.id === $("sttSelect").value);
+    $("saveSttBtn").disabled = true;
+    try {
+      const res = await api("/api/stt", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ engine: chosen.engine, model: chosen.model, display_name: chosen.display_name }),
+      });
+      setStatusLine($("sttStatus"), "ok", res.note);
+      await refreshConfig();
+    } catch (e) {
+      setStatusLine($("sttStatus"), "err", e.message);
+    }
+    $("saveSttBtn").disabled = false;
+  };
+
+  // ---------------- Latency comparison tab ----------------
+
+  const METRIC_COLUMNS = [
+    { field: "end_of_utterance_delay", label: "EOU delay" },
+    { field: "transcription_delay", label: "Transcription" },
+    { field: "llm_ttft", label: "LLM TTFT" },
+    { field: "tts_ttfb", label: "TTS TTFB" },
+  ];
+
+  async function loadLatency() {
+    const wrap = $("latencyTableWrap");
+    wrap.innerHTML = `<div class="empty-state">Loading…</div>`;
+    try {
+      const data = await api("/api/latency");
+      const rows = data.combinations;
+      if (!rows.length) {
+        wrap.innerHTML = `<div class="empty-state">No latency data yet. Make a few test calls with different model combinations, then check back here.</div>`;
+        return;
+      }
+      let html = `<table><thead><tr>
+        <th>Combination</th><th>Samples</th>
+        ${METRIC_COLUMNS.map(c => `<th>${c.label} (mean)</th>`).join("")}
+      </tr></thead><tbody>`;
+      for (const row of rows) {
+        html += `<tr>
+          <td class="combo-cell">
+            <strong>LLM:</strong> ${row.llm_served_model_name}<br>
+            <strong>STT:</strong> ${row.stt_engine}:${row.stt_model}<br>
+            <strong>TTS:</strong> ${row.tts_engine}:${row.tts_model}
+          </td>
+          <td>${row.sample_count}</td>
+          ${METRIC_COLUMNS.map(c => {
+            const mean = row[c.field + "_mean"];
+            const n = row[c.field + "_n"];
+            return `<td class="metric-cell">${mean !== undefined ? mean + "s (n=" + n + ")" : "—"}</td>`;
+          }).join("")}
+        </tr>`;
+      }
+      html += `</tbody></table>`;
+      wrap.innerHTML = html;
+    } catch (e) {
+      wrap.innerHTML = `<div class="empty-state" style="color:#7a231b">${e.message}</div>`;
+    }
+  }
+
+  $("refreshLatencyBtn").onclick = loadLatency;
+  $("clearLatencyBtn").onclick = async () => {
+    if (!confirm("Clear all recorded latency data? This can't be undone.")) return;
+    await api("/api/latency/clear", { method: "POST" });
+    loadLatency();
+  };
+
+  loadAll().catch(e => {
+    document.body.innerHTML = `<div style="padding:40px;font-family:sans-serif;color:#7a231b">${e.message}</div>`;
+  });
+</script>
+</body>
+</html>

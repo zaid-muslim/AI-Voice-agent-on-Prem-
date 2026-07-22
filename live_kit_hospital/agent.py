@@ -13,11 +13,11 @@ Architecture (what changed vs the Pipecat version, and what didn't):
                                           via session.say(), and raises
                                           StopResponse() so the LLM NEVER
                                           generates for that turn.
-  faster-whisper STT                   -> NVIDIA Parakeet TDT by default
-                                          (STT_BACKEND=parakeet), whisper
-                                          kept one env var away
-                                          (STT_BACKEND=whisper) as the
-                                          proven fallback.
+  faster-whisper STT                   -> Any of 4 STT engines (whisper,
+                                          Parakeet, Canary), chosen via
+                                          system_config.json (edit through
+                                          the dev console at :7871), not
+                                          a fixed env var.
   tuned VAD stop_secs (0.3, risky)     -> Silero VAD + the semantic turn-
                                           detector model.
   register_direct_function(...)        -> @function_tool methods below,
@@ -73,59 +73,150 @@ except ImportError:
     _TURN_DETECTOR_INSTALLED = False
 
 import compat
+import latency_log
+import system_config
 from helpers import DEFAULT_FILLERS, push_ui, run_with_filler
 from plugins.qwen_tts import QwenSubprocessTTS
 from prompts import GREETING_INSTRUCTIONS, build_system_prompt
 
 load_dotenv()
 
-# --- shared config (env-overridable) ----------------------------------------
+# --- shared config -----------------------------------------------------
+# INFRASTRUCTURE env vars: where things live / how to reach them. These
+# rarely change and are set once in .env.
 VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", "http://127.0.0.1:8000/v1")
-GEMMA_MODEL_NAME = os.environ.get("GEMMA_MODEL_NAME", "gemma-4-12b-w4a16")
-STT_BACKEND = os.environ.get("STT_BACKEND", "parakeet").lower()
 PARAKEET_MODEL = os.environ.get("PARAKEET_MODEL", "nvidia/parakeet-tdt-0.6b-v2")
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "distil-large-v3")
 MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "300"))
 
+# SELECTION config: WHICH of the available models/backends is active RIGHT
+# NOW. This comes from system_config.py instead of a fixed env var, so a
+# developer's choice from the dev UI takes effect - see system_config.py's
+# docstring for the exact "takes effect on next call" contract. Read fresh
+# in prewarm() and entrypoint() below, never cached at module level, so a
+# change is never more than one prewarm-cycle / one call away.
 
-def _make_stt():
-    """Parakeet TDT by default (SOTA local: leaderboard-topping accuracy,
-    RTFx fast enough that a whole utterance transcribes in tens of ms).
 
-    Three-way fallback chain, in order:
+def _make_stt(stt_cfg: dict):
+    """Chosen by stt_cfg = {"engine": ..., "model": ...} from
+    system_config (schema v2 - see that module's docstring for why this
+    changed from a flat backend string).
+
+    engine="parakeet" fallback chain, in order:
       1. PARAKEET_PYTHON is set -> subprocess plugin. This is the path that
          actually works when the main agent's venv is Python 3.12, since
          NeMo's ASR extras currently fail to build there (see README) -
-         Parakeet runs isolated in its own 3.10/3.11 venv instead, same
-         architecture as the Qwen TTS worker.
+         Parakeet runs isolated in its own 3.10/3.11 venv instead.
       2. PARAKEET_PYTHON unset but `nemo` importable HERE -> in-process
          plugin (only works if your main venv itself is 3.10/3.11).
-      3. Neither -> faster-whisper, the proven fallback. Also handles Urdu
-         code-switching better (Parakeet v2 is English-only)."""
-    if STT_BACKEND == "parakeet":
+      3. Neither -> faster-whisper, the proven fallback.
+
+    engine="canary" needs CANARY_PYTHON/CANARY_WORKER (same NeMo venv as
+    Parakeet typically works - see plugins/canary_worker.py). Falls back
+    to whisper if that infra isn't set, same pattern as parakeet.
+
+    engine="whisper" (or anything unrecognized) -> faster-whisper, using
+    stt_cfg["model"] as the specific checkpoint name (e.g.
+    "distil-large-v3" or "large-v3" - same plugin code, different size)."""
+    engine = stt_cfg.get("engine", "whisper")
+    model = stt_cfg.get("model", WHISPER_MODEL)
+
+    if engine == "parakeet":
         if os.environ.get("PARAKEET_PYTHON"):
             from plugins.parakeet_stt_subprocess import ParakeetSubprocessSTT
 
             logger.info(
-                f"STT backend: Parakeet (subprocess, venv={os.environ['PARAKEET_PYTHON']})"
+                f"STT: Parakeet (subprocess, venv={os.environ['PARAKEET_PYTHON']}, model={model})"
             )
             return ParakeetSubprocessSTT()
         try:
             from plugins.parakeet_stt import ParakeetSTT
 
-            logger.info(f"STT backend: Parakeet (in-process, {PARAKEET_MODEL})")
-            return ParakeetSTT(model=PARAKEET_MODEL)
+            logger.info(f"STT: Parakeet (in-process, {model})")
+            return ParakeetSTT(model=model)
         except ImportError as exc:
             logger.warning(
-                f"STT_BACKEND=parakeet but NeMo isn't importable here ({exc}) and "
-                "PARAKEET_PYTHON isn't set - falling back to faster-whisper. Set "
-                "PARAKEET_PYTHON/PARAKEET_WORKER in .env to use the subprocess "
-                "plugin instead (see README)."
+                f"stt engine=parakeet but NeMo isn't importable here ({exc}) and "
+                "PARAKEET_PYTHON isn't set - falling back to faster-whisper."
             )
+
+    elif engine == "canary":
+        if os.environ.get("CANARY_PYTHON") and os.environ.get("CANARY_WORKER"):
+            from plugins.canary_stt_subprocess import CanarySubprocessSTT
+
+            logger.info(
+                f"STT: Canary (subprocess, venv={os.environ['CANARY_PYTHON']}, model={model})"
+            )
+            return CanarySubprocessSTT(model=model)
+        logger.warning(
+            "stt engine=canary but CANARY_PYTHON/CANARY_WORKER aren't set "
+            "in .env - falling back to faster-whisper."
+        )
+
     from plugins.whisper_stt import FasterWhisperSTT
 
-    logger.info(f"STT backend: faster-whisper ({WHISPER_MODEL})")
-    return FasterWhisperSTT(model=WHISPER_MODEL)
+    logger.info(f"STT: faster-whisper ({model})")
+    return FasterWhisperSTT(model=model)
+
+
+def _make_tts(tts_cfg: dict):
+    """Chosen by tts_cfg = {"engine": ..., "model": ...} from
+    system_config (schema v2). "model" means different things per engine:
+    Qwen -> speaker name, Chatterbox -> unused (single default voice),
+    Kokoro -> voice pack name, Piper -> .onnx file path.
+
+    Each candidate engine falls back to Qwen if its required env vars
+    aren't set - same graceful-degradation pattern used throughout this
+    project rather than crashing the call."""
+    engine = tts_cfg.get("engine", "qwen")
+    model = tts_cfg.get("model", "")
+
+    if engine == "chatterbox":
+        if os.environ.get("CHATTERBOX_PYTHON") and os.environ.get("CHATTERBOX_WORKER"):
+            from plugins.chatterbox_tts import ChatterboxSubprocessTTS
+
+            logger.info(
+                f"TTS: Chatterbox (subprocess, venv={os.environ['CHATTERBOX_PYTHON']}) "
+                f"- NOTE: non-streaming synthesis, see plugins/chatterbox_tts.py"
+            )
+            return ChatterboxSubprocessTTS()
+        logger.warning(
+            "tts engine=chatterbox but CHATTERBOX_PYTHON/CHATTERBOX_WORKER "
+            "aren't set in .env - falling back to Qwen."
+        )
+
+    elif engine == "kokoro":
+        if os.environ.get("KOKORO_PYTHON") and os.environ.get("KOKORO_WORKER"):
+            from plugins.kokoro_tts import KokoroSubprocessTTS
+
+            voice = model or "af_heart"
+            logger.info(
+                f"TTS: Kokoro (subprocess, venv={os.environ['KOKORO_PYTHON']}, voice={voice})"
+            )
+            return KokoroSubprocessTTS(voice=voice)
+        logger.warning(
+            "tts engine=kokoro but KOKORO_PYTHON/KOKORO_WORKER aren't set "
+            "in .env - falling back to Qwen."
+        )
+
+    elif engine == "piper":
+        if os.environ.get("PIPER_PYTHON") and os.environ.get("PIPER_WORKER"):
+            from plugins.piper_tts import PiperSubprocessTTS
+
+            model_path = model or os.environ.get("PIPER_MODEL_PATH", "")
+            logger.info(
+                f"TTS: Piper (subprocess, venv={os.environ['PIPER_PYTHON']}, "
+                f"voice={model_path}) - GPL-3.0 licensed, verify this fits "
+                f"your deployment (see plugins/piper_worker.py)"
+            )
+            return PiperSubprocessTTS(model_path=model_path)
+        logger.warning(
+            "tts engine=piper but PIPER_PYTHON/PIPER_WORKER aren't set "
+            "in .env - falling back to Qwen."
+        )
+
+    logger.info("TTS: Qwen (subprocess, proven)")
+    return QwenSubprocessTTS()
 
 
 def _group_slots(flat_slots: list) -> list:
@@ -390,17 +481,27 @@ def prewarm(proc: JobProcess) -> None:
     """Runs once per worker process, BEFORE any call is accepted. All the
     warm-up lessons from the Pipecat build live here or in entrypoint():
     a cold anything (VAD, STT, RAG embedder, vLLM, TTS CUDA graphs) must
-    never be paid for by a real caller's first turn."""
+    never be paid for by a real caller's first turn.
+
+    CROSS-PROCESS NOTE on the dev-UI model switcher: this reads
+    system_config fresh at the moment THIS worker process starts up. A
+    developer's STT-backend switch takes effect for any NEWLY SPAWNED
+    worker process - an already-warmed, already-pooled process keeps
+    whatever it was warmed with until LiveKit recycles it. Same honest
+    cross-process caveat as the hospital-data admin UI, documented there
+    for the same underlying reason (this file, admin_server.py, and the
+    dev UI are all separate processes with their own in-memory state)."""
+    cfg = system_config.get_config()
     proc.userdata["vad"] = silero.VAD.load(
         min_silence_duration=float(os.environ.get("VAD_MIN_SILENCE", "0.4")),
     )
-    stt_service = _make_stt()
+    stt_service = _make_stt(cfg["stt"])
     stt_service.load()
     proc.userdata["stt"] = stt_service
     compat.warm_rag()
 
 
-async def _warm_up_vllm() -> None:
+async def _warm_up_vllm(served_model_name: str) -> None:
     """One tiny completion so the first real turn doesn't eat vLLM's
     cold-start spike (~2s observed live in the old build)."""
     try:
@@ -408,13 +509,27 @@ async def _warm_up_vllm() -> None:
             async with http.post(
                 f"{VLLM_BASE_URL}/chat/completions",
                 json={
-                    "model": GEMMA_MODEL_NAME,
+                    "model": served_model_name,
                     "max_tokens": 4,
                     "messages": [{"role": "user", "content": "ping"}],
                 },
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:
-                await resp.read()
+                body = await resp.text()
+                if resp.status != 200:
+                    # Previously this just called resp.read() and logged
+                    # "OK" unconditionally, which silently masked a wrong
+                    # served_model_name (vLLM returns 404 "model does not
+                    # exist" here, not a connection error) as a false
+                    # success. Surface it loudly instead.
+                    logger.error(
+                        f"vLLM warm-up ping got HTTP {resp.status} - "
+                        f"served_model_name='{served_model_name}' likely doesn't "
+                        f"match what vLLM is actually serving. Check with "
+                        f"`curl {VLLM_BASE_URL}/models` and fix system_config.json "
+                        f"(or switch models again via the dev UI). Body: {body[:300]}"
+                    )
+                    return
         logger.info("vLLM warm-up ping OK.")
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"vLLM warm-up ping failed (continuing): {exc}")
@@ -423,8 +538,16 @@ async def _warm_up_vllm() -> None:
 async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect()
 
-    tts_service = QwenSubprocessTTS()
-    await asyncio.gather(_warm_up_vllm(), tts_service.prewarm())
+    # Read fresh HERE, at the start of every call - this is what makes a
+    # dev-UI model switch take effect on "the next call" rather than
+    # needing a full agent restart. See system_config.py's docstring for
+    # the full contract (and vllm_manager.py for why an LLM switch has a
+    # real ~60s+ cost the TTS/STT switches don't).
+    cfg = system_config.get_config()
+    served_model_name = cfg["llm"]["served_model_name"]
+
+    tts_service = _make_tts(cfg["tts"])
+    await asyncio.gather(_warm_up_vllm(served_model_name), tts_service.prewarm())
 
     # Semantic turn detection: the single highest-leverage latency change of
     # this whole migration. Falls back to plain VAD end-pointing if the
@@ -454,12 +577,14 @@ async def entrypoint(ctx: JobContext) -> None:
         vad=ctx.proc.userdata["vad"],
         stt=ctx.proc.userdata["stt"],
         llm=openai.LLM(
-            model=GEMMA_MODEL_NAME,
+            model=served_model_name,
             base_url=VLLM_BASE_URL,
             api_key="not-needed",  # vLLM ignores it; the plugin requires one
         ),
         tts=tts_service,
         turn_detection=turn_detection,
+        min_endpointing_delay=0.1,
+        max_endpointing_delay=6.0,
     )
 
     # --- observability: per-stage latency (STT / LLM TTFT / TTS TTFB / EOU)
@@ -469,6 +594,32 @@ async def entrypoint(ctx: JobContext) -> None:
     def _on_metrics(ev) -> None:
         metrics.log_metrics(ev.metrics)
         usage.collect(ev.metrics)
+
+        # LATENCY COMPARISON LOGGING (dev console feature): LiveKit emits
+        # EOU / LLM / TTS metrics as SEPARATE events per turn, each
+        # carrying its own field set (confirmed from this project's own
+        # real logs: EOU events carry end_of_utterance_delay +
+        # transcription_delay; LLM events carry ttft; TTS events carry
+        # ttfb). Rather than assume a way to correlate multiple events
+        # into one combined "turn" record (which would need verifying
+        # LiveKit's internal event-correlation ID, not available to check
+        # in this build environment), this logs ONE RECORD PER EVENT,
+        # populated with whichever tracked fields that specific event
+        # actually has. latency_log.get_summary() already averages each
+        # field independently across all records for a combo, so these
+        # sparse per-event records aggregate correctly regardless.
+        fields = {}
+        for raw_name, log_name in (
+            ("end_of_utterance_delay", "end_of_utterance_delay"),
+            ("transcription_delay", "transcription_delay"),
+            ("ttft", "llm_ttft"),
+            ("ttfb", "tts_ttfb"),
+        ):
+            value = getattr(ev.metrics, raw_name, None)
+            if value is not None:
+                fields[log_name] = value
+        if fields:
+            latency_log.record(cfg, fields)
 
     async def _log_usage() -> None:
         logger.info(f"Session usage summary: {usage.get_summary()}")
@@ -491,14 +642,20 @@ if __name__ == "__main__":
         agents.WorkerOptions(
             entrypoint_fnc=entrypoint,
             prewarm_fnc=prewarm,
-            # DEFAULT IS 10s. prewarm() loads Silero VAD + STT (whisper or
-            # Parakeet) + the RAG sentence-transformers embedder - on a
-            # cold cache (first run, or first HF download) that combination
-            # can easily exceed 10s, and LiveKit kills the process mid-load
-            # with no useful error beyond "no process became available".
-            # 120s gives real headroom for a first-time model download;
-            # once everything is cached locally this returns in a few
-            # seconds and the extra timeout costs nothing.
-            initialize_process_timeout=120.0,
+            # DEFAULT IS 10s. prewarm() chains Silero VAD -> STT (whisper,
+            # in-process Parakeet, or the Parakeet SUBPROCESS which itself
+            # needs ~15-20s to load in its own venv) -> the RAG
+            # sentence-transformers embedder. On a cold cache, or under GPU
+            # contention from vLLM/Qwen already running, that chain can
+            # exceed even a generous ceiling - and LiveKit kills the whole
+            # process the instant it's exceeded, sometimes mid-report (a
+            # BrokenPipeError from the Parakeet worker trying to write
+            # "ready" to an already-closed parent pipe is the signature of
+            # this exact race). 300s gives real headroom for the worst
+            # case: first-time downloads AND three GPU processes competing
+            # for the same card. Once everything is warm/cached, prewarm
+            # actually finishes in a fraction of this - the timeout only
+            # costs anything on a failure, never on the happy path.
+            initialize_process_timeout=300.0,
         )
     )

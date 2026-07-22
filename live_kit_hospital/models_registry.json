@@ -1,0 +1,123 @@
+{
+  "_comment": "Curated options for the dev console. 'verified' = run successfully on THIS project's own hardware/logs during development. 'candidate' = a real, valid model - API verified against its actual published source where a new plugin was needed - but NOT run end-to-end on real hardware in this build environment (no GPU/internet-to-HuggingFace here). Every entry's license was checked directly, not assumed - see each 'license' field.",
+
+  "llm_models": [
+    {
+      "served_model_name": "gemma-4-12b",
+      "source": "/home/nauyan/voice-agent-pipeline/models/gemma-4-12b-w4a16",
+      "display_name": "Gemma 4 12B (w4a16, local)",
+      "status": "verified",
+      "license": "Gemma license (see Google's terms)",
+      "note": "Confirmed working with --max-model-len 4096, --gpu-memory-utilization 0.40, --kv-cache-dtype bfloat16 on a single RTX 3090 (see run_vllm.sh)."
+    },
+    {
+      "served_model_name": "llama-3.1-8b",
+      "source": "meta-llama/Llama-3.1-8B-Instruct",
+      "display_name": "Llama 3.1 8B Instruct",
+      "status": "candidate",
+      "license": "Llama 3.1 Community License (custom, generally usable - has a >700M MAU redistribution clause; read it for your situation)",
+      "note": "Real, standard vLLM-supported model, auto-downloads via vLLM's own HF integration. NOT tested on this project's GPU budget - check its weight size against the memory math in run_vllm.sh before switching live. Gated on Hugging Face - needs a HF token with access accepted."
+    },
+    {
+      "served_model_name": "qwen2.5-7b",
+      "source": "Qwen/Qwen2.5-7B-Instruct",
+      "display_name": "Qwen2.5 7B Instruct",
+      "status": "candidate",
+      "license": "Apache-2.0",
+      "note": "Real, standard vLLM-supported model. Worth trying for Urdu/multilingual callers given Qwen's known multilingual strength - untested here, verify quality and GPU fit before trusting live."
+    },
+    {
+      "served_model_name": "mistral-7b",
+      "source": "mistralai/Mistral-7B-Instruct-v0.3",
+      "display_name": "Mistral 7B Instruct v0.3",
+      "status": "candidate",
+      "license": "Apache-2.0",
+      "note": "Real, standard vLLM-supported model. Untested on this project's GPU budget or with the gemma4 tool-call template/parser - you likely need a DIFFERENT --chat-template and --tool-call-parser for this model family; don't assume the existing gemma4 ones apply."
+    },
+    {
+      "served_model_name": "custom",
+      "source": "",
+      "display_name": "Custom (enter a local path or HF repo id)",
+      "status": "candidate",
+      "note": "vLLM auto-downloads from Hugging Face if given a repo id it doesn't have locally. Check size against your measured GPU budget first (see run_vllm.sh's comments) - not guaranteed to fit."
+    }
+  ],
+
+  "stt_backends": [
+    {
+      "id": "whisper-distil-large-v3",
+      "engine": "whisper",
+      "model": "distil-large-v3",
+      "display_name": "Whisper distil-large-v3 (proven default)",
+      "status": "verified",
+      "license": "MIT",
+      "note": "Proven in real calls this project. Handles Urdu code-switching. Per this project's own measured comparison, the ~500ms fixed endpointing delay dominates end-to-end latency regardless of STT engine - don't expect a dramatically different feel from other STT choices."
+    },
+    {
+      "id": "whisper-large-v3",
+      "engine": "whisper",
+      "model": "large-v3",
+      "display_name": "Whisper large-v3 (bigger, slower, same engine)",
+      "status": "candidate",
+      "license": "MIT",
+      "note": "Same plugin code as the verified distil-large-v3 entry above - just a bigger checkpoint (more accurate on hard audio, slower and more VRAM). No new code, low risk to try - reuses the already-proven whisper_stt.py plugin unmodified."
+    },
+    {
+      "id": "parakeet-tdt-0.6b-v2",
+      "engine": "parakeet",
+      "model": "nvidia/parakeet-tdt-0.6b-v2",
+      "display_name": "NVIDIA Parakeet TDT (subprocess, verified)",
+      "status": "verified",
+      "license": "CC-BY-4.0",
+      "note": "Confirmed working via the isolated-venv subprocess path after resolving a real torch/cuDNN version mismatch this project hit live (see README's troubleshooting history). English-only. Measured ~20-30ms faster than whisper end-to-end - real but small given the fixed endpointing delay."
+    },
+    {
+      "id": "canary-180m-flash",
+      "engine": "canary",
+      "model": "nvidia/canary-180m-flash",
+      "display_name": "NVIDIA Canary 180M Flash (subprocess, candidate)",
+      "status": "candidate",
+      "license": "CC-BY-4.0 (commercial-safe - NOTE: the base nvidia/canary-1b model is CC-BY-NC-4.0, non-commercial - this is deliberately the flash variant, don't swap to canary-1b without checking its license fits your use)",
+      "note": "Tops the HF Open ASR leaderboard for its size class (1200+ RTFx). Same NeMo venv as Parakeet - low setup friction. API verified against real published usage (uses EncDecMultiTaskModel, a DIFFERENT NeMo class than Parakeet's ASRModel) but not run end-to-end here. Transcribes via a short-lived temp WAV file per utterance (see plugins/canary_worker.py's honest note on why raw-array support wasn't assumed)."
+    }
+  ],
+
+  "tts_backends": [
+    {
+      "id": "qwen-aiden",
+      "engine": "qwen",
+      "model": "aiden",
+      "display_name": "Qwen TTS (aiden voice, proven default)",
+      "status": "verified",
+      "license": "Qwen license (see Alibaba's terms)",
+      "note": "Runs via plugins/qwen_tts.py + your existing .venv-voice worker. Confirmed working end-to-end on real calls this project."
+    },
+    {
+      "id": "chatterbox-default",
+      "engine": "chatterbox",
+      "model": "default",
+      "display_name": "Chatterbox TTS (Resemble AI, candidate)",
+      "status": "candidate",
+      "license": "See resemble-ai/chatterbox's repository for current terms",
+      "note": "API verified against its real v0.1.7 source. Needs its OWN dedicated venv (pins torch==2.6.0 exactly). NON-STREAMING synthesis - generate() produces the whole utterance before any audio exists; this worker chunks the FINISHED audio for transport only. Known install caveat: some environments hit a spacy-pkuseg build failure (see resemble-ai/chatterbox issue #367)."
+    },
+    {
+      "id": "kokoro-af_heart",
+      "engine": "kokoro",
+      "model": "af_heart",
+      "display_name": "Kokoro-82M (af_heart voice, candidate)",
+      "status": "candidate",
+      "license": "Apache-2.0 (explicitly commercial-friendly per the maintainer)",
+      "note": "API verified against its real v0.9.4 source. Tiny (82M params, ~2GB VRAM) and GENUINELY STREAMS per-segment (a real generator, unlike Chatterbox's one-shot synthesis) - confirmed via a real subprocess test producing multiple distinct audio chunks per multi-sentence input. No hard torch version pin, lower dependency friction than Chatterbox. Other voices available - see hexgrad/Kokoro-82M's VOICES.md."
+    },
+    {
+      "id": "piper-en_US-lessac-medium",
+      "engine": "piper",
+      "model": "/home/nauyan/voice-agent-pipeline/models/piper/en_US-lessac-medium.onnx",
+      "display_name": "Piper TTS (CPU-only, candidate)",
+      "status": "candidate",
+      "license": "GPL-3.0-or-later (current maintained fork, OHF-Voice/piper1-gpl - REAL caveat, get this checked against your deployment before shipping commercially; the older MIT-licensed rhasspy/piper repo is archived/unmaintained)",
+      "note": "API verified against its real v1.5.0 source. The ONLY engine in this project needing NO GPU/torch at all (onnxruntime only) - useful if your GPU is saturated by the LLM+other STT/TTS, or on a machine with no GPU. Voice models are NOT auto-downloaded like every other engine here - fetch the .onnx + matching .json from https://huggingface.co/rhasspy/piper-voices manually first."
+    }
+  ]
+}

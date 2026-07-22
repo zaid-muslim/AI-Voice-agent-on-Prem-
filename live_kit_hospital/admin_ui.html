@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Riverside General — Data Admin</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --cardiology: #C0392F;
+    --general-medicine: #1F7A5C;
+    --pediatrics: #D9930D;
+    --desk: #2E5E8C;
+    --ink: #1a2230;
+    --ink-soft: #55617a;
+    --paper: #f4f5f7;
+    --card: #ffffff;
+    --line: #dfe3ea;
+    --line-strong: #c4cad6;
+    --ok: #1F7A5C;
+    --warn: #D9930D;
+    --err: #C0392F;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "Archivo", system-ui, sans-serif;
+    font-size: 15px;
+    line-height: 1.5;
+  }
+  header {
+    background: var(--card);
+    border-bottom: 2px solid var(--line-strong);
+    padding: 18px 28px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 20;
+  }
+  header .brand { font-weight: 800; letter-spacing: -0.01em; font-size: 18px; }
+  header .brand span { color: var(--desk); }
+  header .sub {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 12px;
+    color: var(--ink-soft);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-top: 2px;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 24px 28px 120px; }
+
+  .toolbar {
+    display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+    margin-bottom: 20px;
+  }
+  button {
+    font-family: "Archivo", sans-serif;
+    font-weight: 600;
+    font-size: 14px;
+    border: 1.5px solid var(--line-strong);
+    background: var(--card);
+    color: var(--ink);
+    padding: 9px 16px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.12s ease;
+  }
+  button:hover { border-color: var(--desk); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.primary {
+    background: var(--desk); color: #fff; border-color: var(--desk);
+  }
+  button.primary:hover { filter: brightness(1.08); }
+  button.danger { border-color: var(--err); color: var(--err); }
+  button.danger:hover { background: var(--err); color: #fff; }
+  button.small { padding: 5px 10px; font-size: 12.5px; }
+
+  .cat-group { margin-bottom: 28px; }
+  .cat-head {
+    display: flex; align-items: center; gap: 10px;
+    margin: 0 0 10px;
+    font-size: 13px;
+    font-family: "IBM Plex Mono", monospace;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--ink-soft);
+  }
+  .cat-head .bar { width: 26px; height: 5px; border-radius: 3px; background: var(--desk); }
+  .cat-cardiology .bar { background: var(--cardiology); }
+  .cat-general-medicine .bar { background: var(--general-medicine); }
+  .cat-pediatrics .bar { background: var(--pediatrics); }
+  .cat-doctors .bar { background: var(--cardiology); }
+  .cat-departments .bar { background: var(--desk); }
+
+  .entry {
+    background: var(--card);
+    border: 1.5px solid var(--line);
+    border-radius: 12px;
+    padding: 16px 18px;
+    margin-bottom: 12px;
+  }
+  .entry.dirty { border-color: var(--warn); box-shadow: 0 0 0 3px rgba(217,147,13,0.12); }
+  .entry.removing { opacity: 0.45; }
+  .entry-top {
+    display: flex; gap: 12px; align-items: flex-start;
+    margin-bottom: 10px;
+  }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label {
+    font-size: 11px;
+    font-family: "IBM Plex Mono", monospace;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--ink-soft);
+  }
+  input, textarea, select {
+    font-family: "Archivo", sans-serif;
+    font-size: 14.5px;
+    color: var(--ink);
+    border: 1.5px solid var(--line-strong);
+    border-radius: 7px;
+    padding: 8px 10px;
+    background: #fcfcfd;
+    width: 100%;
+  }
+  input:focus, textarea:focus, select:focus {
+    outline: none; border-color: var(--desk);
+    box-shadow: 0 0 0 3px rgba(46,94,140,0.12);
+  }
+  input:disabled { background: #eef0f3; color: var(--ink-soft); }
+  .id-field { font-family: "IBM Plex Mono", monospace; font-size: 12.5px; }
+  textarea { resize: vertical; min-height: 68px; line-height: 1.45; }
+  .charcount {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 11px;
+    color: var(--ink-soft);
+    text-align: right;
+    margin-top: 2px;
+  }
+  .charcount.bad { color: var(--err); }
+
+  .row-title { flex: 1; }
+  .row-cat { width: 190px; flex-shrink: 0; }
+  .entry-actions { display: flex; gap: 8px; margin-top: 4px; }
+
+  /* Sticky save bar */
+  .savebar {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    background: var(--card);
+    border-top: 2px solid var(--line-strong);
+    padding: 14px 28px;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px;
+    z-index: 30;
+  }
+  .savebar .status { font-size: 14px; color: var(--ink-soft); }
+  .savebar .status.ok { color: var(--ok); font-weight: 600; }
+  .savebar .status.err { color: var(--err); font-weight: 600; }
+  .savebar .status.warn { color: var(--warn); font-weight: 600; }
+  .savebar .actions { display: flex; gap: 10px; }
+
+  .banner {
+    padding: 12px 16px; border-radius: 9px; margin-bottom: 18px;
+    font-size: 14px; display: none;
+  }
+  .banner.show { display: block; }
+  .banner.err { background: #fbeceb; color: #7a231b; border: 1.5px solid var(--err); }
+  .banner.ok { background: #e7f4ef; color: #12503b; border: 1.5px solid var(--ok); }
+  .banner.warn { background: #fbf1dd; color: #6b4906; border: 1.5px solid var(--warn); }
+  .banner ul { margin: 6px 0 0; padding-left: 20px; }
+
+  .empty { color: var(--ink-soft); font-style: italic; padding: 40px; text-align: center; }
+  .hint { font-size: 12.5px; color: var(--ink-soft); margin-top: -6px; margin-bottom: 16px; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <div class="brand">Riverside <span>General</span> — Data Admin</div>
+    <div class="sub">Doctors · Departments · Hospital Info</div>
+  </div>
+  <button id="reloadBtn" class="small">Reload from server</button>
+</header>
+
+<div class="wrap">
+  <div class="banner" id="banner"></div>
+  <p class="hint">
+    Edit hospital information here. Changes take effect on the next call after
+    you save — calls already in progress are not affected. The confirmation
+    code and doctor directory callers hear come from this data.
+  </p>
+
+  <div class="toolbar">
+    <button id="addDoctor" class="small">+ Add doctor</button>
+    <button id="addDepartment" class="small">+ Add department</button>
+    <button id="addInfo" class="small">+ Add info entry</button>
+  </div>
+
+  <div id="entries"></div>
+</div>
+
+<div class="savebar">
+  <div class="status" id="saveStatus">Loading…</div>
+  <div class="actions">
+    <button id="discardBtn" disabled>Discard changes</button>
+    <button id="saveBtn" class="primary" disabled>Save changes</button>
+  </div>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  let entries = [];       // working copy (edited in place)
+  let original = "";      // JSON snapshot to detect unsaved changes
+  let categories = [];
+
+  const KNOWN_CATS = ["doctors", "departments", "hours", "insurance",
+    "billing", "prescriptions", "policy", "lab", "location"];
+
+  function catClass(cat) {
+    return "cat-" + (cat || "").toLowerCase().replace(/\s+/g, "-");
+  }
+
+  function isDirty() {
+    return JSON.stringify(entries) !== original;
+  }
+
+  function refreshDirtyState() {
+    const dirty = isDirty();
+    $("saveBtn").disabled = !dirty;
+    $("discardBtn").disabled = !dirty;
+    if (dirty) {
+      setStatus("Unsaved changes", "warn");
+    } else {
+      setStatus(`${entries.length} entries · all saved`, "ok");
+    }
+  }
+
+  function setStatus(msg, kind) {
+    const el = $("saveStatus");
+    el.textContent = msg;
+    el.className = "status" + (kind ? " " + kind : "");
+  }
+
+  function showBanner(html, kind) {
+    const b = $("banner");
+    b.innerHTML = html;
+    b.className = "banner show " + kind;
+  }
+  function hideBanner() { $("banner").className = "banner"; }
+
+  // Basic-auth is handled by the browser dialog on first request; credentials
+  // are then cached by the browser for subsequent calls automatically.
+  async function api(path, opts = {}) {
+    const res = await fetch(path, opts);
+    if (res.status === 401) {
+      throw new Error("Wrong password — reload the page to try again.");
+    }
+    if (!res.ok) {
+      let detail = `HTTP ${res.status}`;
+      try { detail = (await res.json()).detail || detail; } catch (e) {}
+      throw new Error(detail);
+    }
+    return res.json();
+  }
+
+  async function load() {
+    setStatus("Loading…");
+    try {
+      const data = await api("/api/entries");
+      entries = data.entries;
+      categories = data.categories;
+      original = JSON.stringify(entries);
+      render();
+      refreshDirtyState();
+      hideBanner();
+    } catch (e) {
+      setStatus(e.message, "err");
+      showBanner(e.message, "err");
+    }
+  }
+
+  function catOptions(selected) {
+    const cats = Array.from(new Set([...KNOWN_CATS, ...categories]));
+    return cats.map(c =>
+      `<option value="${c}" ${c === selected ? "selected" : ""}>${c}</option>`
+    ).join("");
+  }
+
+  function render() {
+    const root = $("entries");
+    root.innerHTML = "";
+    if (!entries.length) {
+      root.innerHTML = `<div class="empty">No entries yet. Use the buttons above to add one.</div>`;
+      return;
+    }
+    // group by category, in a stable known order
+    const order = KNOWN_CATS.concat(
+      categories.filter(c => !KNOWN_CATS.includes(c))
+    );
+    const byCat = {};
+    entries.forEach((e, i) => {
+      (byCat[e.category] = byCat[e.category] || []).push(i);
+    });
+
+    order.forEach(cat => {
+      if (!byCat[cat]) return;
+      const group = document.createElement("div");
+      group.className = "cat-group " + catClass(cat);
+      group.innerHTML = `<div class="cat-head ${catClass(cat)}"><span class="bar"></span>${cat} · ${byCat[cat].length}</div>`;
+      byCat[cat].forEach(i => group.appendChild(entryCard(i)));
+      root.appendChild(group);
+    });
+  }
+
+  function entryCard(i) {
+    const e = entries[i];
+    const card = document.createElement("div");
+    card.className = "entry";
+    const len = (e.text || "").length;
+    const lenBad = len < 20 || len > 400;
+    card.innerHTML = `
+      <div class="entry-top">
+        <div class="field row-title">
+          <label>Title</label>
+          <input data-i="${i}" data-f="title" value="${escapeAttr(e.title)}" />
+        </div>
+        <div class="field row-cat">
+          <label>Category</label>
+          <select data-i="${i}" data-f="category">${catOptions(e.category)}</select>
+        </div>
+      </div>
+      <div class="field">
+        <label>ID <span style="text-transform:none;opacity:0.6">(unique, no spaces)</span></label>
+        <input class="id-field" data-i="${i}" data-f="id" value="${escapeAttr(e.id)}" />
+      </div>
+      <div class="field" style="margin-top:10px">
+        <label>Text — what the agent reads to callers</label>
+        <textarea data-i="${i}" data-f="text">${escapeHtml(e.text)}</textarea>
+        <div class="charcount ${lenBad ? "bad" : ""}">${len} chars (20–400 recommended)</div>
+      </div>
+      <div class="entry-actions">
+        <button class="small danger" data-del="${i}">Delete</button>
+      </div>
+    `;
+    return card;
+  }
+
+  function escapeHtml(s) {
+    return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  function escapeAttr(s) {
+    return escapeHtml(s).replace(/"/g, "&quot;");
+  }
+
+  // Delegated input handling — update working copy as the admin types
+  $("entries").addEventListener("input", (ev) => {
+    const t = ev.target;
+    const i = t.dataset.i, f = t.dataset.f;
+    if (i === undefined || !f) return;
+    entries[+i][f] = t.value;
+    if (f === "text") {
+      const cc = t.parentElement.querySelector(".charcount");
+      const len = t.value.length;
+      cc.textContent = `${len} chars (20–400 recommended)`;
+      cc.className = "charcount" + ((len < 20 || len > 400) ? " bad" : "");
+    }
+    t.closest(".entry").classList.add("dirty");
+    refreshDirtyState();
+  });
+
+  $("entries").addEventListener("click", (ev) => {
+    const del = ev.target.dataset.del;
+    if (del === undefined) return;
+    const e = entries[+del];
+    if (!confirm(`Delete "${e.title}"? This can't be undone after you save.`)) return;
+    entries.splice(+del, 1);
+    render();
+    refreshDirtyState();
+  });
+
+  function addEntry(category, titlePlaceholder) {
+    const base = category === "doctors" ? "doctor" : category === "departments" ? "dept" : "info";
+    const id = `${base}_${Date.now().toString(36)}`;
+    entries.push({ id, category, title: titlePlaceholder, text: "" });
+    render();
+    refreshDirtyState();
+    // scroll to and focus the new entry's title
+    const inputs = document.querySelectorAll(`input[data-f="title"]`);
+    const last = inputs[inputs.length - 1];
+    if (last) { last.scrollIntoView({ behavior: "smooth", block: "center" }); last.focus(); last.select(); }
+  }
+
+  $("addDoctor").onclick = () => addEntry("doctors", "Dr. ");
+  $("addDepartment").onclick = () => addEntry("departments", "New department");
+  $("addInfo").onclick = () => addEntry("hours", "New info entry");
+
+  $("discardBtn").onclick = () => {
+    if (!confirm("Discard all unsaved changes?")) return;
+    entries = JSON.parse(original);
+    render();
+    refreshDirtyState();
+    hideBanner();
+  };
+
+  $("reloadBtn").onclick = () => {
+    if (isDirty() && !confirm("You have unsaved changes. Reload and lose them?")) return;
+    load();
+  };
+
+  $("saveBtn").onclick = async () => {
+    $("saveBtn").disabled = true;
+    setStatus("Saving…");
+    hideBanner();
+    try {
+      const res = await api("/api/entries", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ entries }),
+      });
+      original = JSON.stringify(entries);
+      render();
+      refreshDirtyState();
+      let msg = `Saved ${res.count} entries. ${res.reindex_note}.`;
+      if (res.warnings && res.warnings.length) {
+        showBanner(
+          `Saved, with warnings to review:<ul>${res.warnings.map(w => `<li>${escapeHtml(w)}</li>`).join("")}</ul>`,
+          "warn"
+        );
+      } else {
+        showBanner(msg, "ok");
+      }
+      setStatus(`${entries.length} entries · saved`, "ok");
+    } catch (e) {
+      setStatus("Save failed", "err");
+      showBanner(escapeHtml(e.message).replace(/\n/g, "<br>"), "err");
+      $("saveBtn").disabled = false;
+    }
+  };
+
+  // Warn before leaving with unsaved changes
+  window.addEventListener("beforeunload", (e) => {
+    if (isDirty()) { e.preventDefault(); e.returnValue = ""; }
+  });
+
+  load();
+</script>
+</body>
+</html>

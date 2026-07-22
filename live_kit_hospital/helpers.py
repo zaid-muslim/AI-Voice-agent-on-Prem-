@@ -28,7 +28,7 @@ UI_TOPIC = "hospital.ui"
 # Speak a filler only if the tool hasn't returned within this window.
 # Your Pipecat timing self-test proved this pattern: fast tool -> no filler;
 # slow tool -> filler + wait for the real result.
-FILLER_THRESHOLD_SECS = 1.2
+FILLER_THRESHOLD_SECS = 0.7
 
 DEFAULT_FILLERS = {
     "check_availability": "One moment, let me check the schedule for you.",
