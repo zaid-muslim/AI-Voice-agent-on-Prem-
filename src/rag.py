@@ -19,6 +19,12 @@ import db
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INDEX_MATRIX_PATH = os.path.join(PROJECT_ROOT, "data", "rag_index.npy")
+# Inside data/ (already a persisted volume mount for the worker container, see docker-compose.yml)
+# rather than fastembed's own default (/tmp/fastembed_cache under Docker) — otherwise every fresh
+# container re-downloads the ~130MB ONNX model from scratch. That download alone can exceed
+# LiveKit's default 10s initialize_process_timeout, repeatedly killing and restarting prewarm
+# before the download ever completes — confirmed live, not hypothetical.
+EMBED_CACHE_DIR = os.path.join(PROJECT_ROOT, "data", "fastembed_cache")
 
 EMBED_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 # Calibrated against the real corpus + live model: on-topic HBL questions scored 0.68-0.85
@@ -43,7 +49,7 @@ def init(conn) -> None:
     returns no_match instead of crashing — the server can still start without a corpus."""
     global _embed_model, _doc_matrix, _chunk_meta
     from fastembed import TextEmbedding
-    _embed_model = TextEmbedding(model_name=EMBED_MODEL_NAME)
+    _embed_model = TextEmbedding(model_name=EMBED_MODEL_NAME, cache_dir=EMBED_CACHE_DIR)
 
     _chunk_meta = db.fetch_all_rag_chunks(conn)
     if os.path.exists(INDEX_MATRIX_PATH):

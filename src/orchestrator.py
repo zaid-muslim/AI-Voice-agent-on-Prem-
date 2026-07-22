@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """Post-confirmation backend orchestration for the model-selection feature.
 
-Launches vLLM, Chatterbox, and the agent worker as subprocesses per the user's confirmed
-config/models_config.json selection, and tracks readiness for the frontend to poll. This is the
-Python translation of run.sh's old backgrounding / `kill -0` liveness-check / readiness-polling
-patterns, for the pieces that now start on demand (post-confirmation) instead of unconditionally
-at pipeline boot — nothing here should silently diverge from that proven bash behavior (see the
-`_http_ready`/`_log_grep_ready` comments below for the specific things that must match exactly).
+Launches vLLM, the shared Whisper STT service, Chatterbox, and the agent worker as Docker
+containers (via `docker compose`) per the user's confirmed config/models_config.json selection,
+and tracks readiness for the frontend to poll. Each of the four lives in docker-compose.yml under
+the "on-demand" profile — nothing here starts at pipeline boot, only after a browser confirms a
+selection, matching the pre-Docker subprocess-based design this replaces.
+
+Every `docker compose` invocation touching these four services passes `--profile on-demand`
+explicitly, on every subcommand (up/stop/logs/ps) — Compose has a known inconsistency where naming
+a profiled service alone doesn't reliably activate its profile for every subcommand, so don't rely
+on that; always pass the flag.
 """
 import asyncio
 import json
 import os
-import signal
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,9 +24,12 @@ import aiohttp
 PROJECT_ROOT = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 MODELS_CONFIG_FILE = PROJECT_ROOT / "config" / "models_config.json"
 LOGS_DIR = PROJECT_ROOT / "logs"
-VENV_PY = PROJECT_ROOT / ".venv" / "bin" / "python"
 
 CATEGORIES = ("llm", "stt", "tts")
+# UI category -> docker-compose.yml service name. The worker has no UI category/backend row of
+# its own (see BackendState below) but is launched the same way as these three.
+CATEGORY_TO_SERVICE = {"llm": "vllm", "stt": "whisper", "tts": "chatterbox"}
+COMPOSE_BASE = ["docker", "compose", "--profile", "on-demand"]
 
 
 def load_models_config() -> dict:
@@ -75,7 +81,11 @@ class OrchestratorState:
     backends: dict[str, BackendState] = field(default_factory=dict)
     selection: dict | None = None
     error: str | None = None
-    procs: dict[str, asyncio.subprocess.Process] = field(default_factory=dict)
+    # Background `docker compose logs -f` tailers (logs/<service>.log), for debugging convenience
+    # only — not the container's actual lifecycle, which docker compose itself owns. Best-effort:
+    # losing one doesn't affect correctness, just makes `tail logs/whisper.log`-style debugging
+    # unavailable for that service.
+    log_tailers: dict[str, asyncio.subprocess.Process] = field(default_factory=dict)
 
 
 STATE = OrchestratorState()
@@ -102,7 +112,7 @@ async def start_selection(selection: dict) -> None:
         STATE.selection = dict(selection)
         STATE.backends = {c: BackendState("loading") for c in CATEGORIES}
         STATE.error = None
-        STATE.procs = {}
+        STATE.log_tailers = {}
 
     asyncio.create_task(_run(entries["llm"], entries["stt"], entries["tts"]))
 
@@ -115,10 +125,10 @@ async def _run(llm_entry: dict, stt_entry: dict, tts_entry: dict) -> None:
         # the GPU/PCIe — proven in practice to blow past startup_timeout_s. Load one at a time;
         # total wall-clock is the sum instead of the max, but it's the safer trade on this
         # hardware. Order: the three UI-backed services (llm/stt/tts), each flipping its own
-        # backend row to "ready", then the worker last (no UI row — its "Prewarm complete." gates
-        # overall phase="ready"). The worker's prewarm (Silero VAD + RAG index, no GPU) has no
-        # dependency on the services being up, and the frontend never reveals "Start Call" until
-        # phase == "ready", so no real call reaches entrypoint() before every service is reachable.
+        # backend row to "ready", then the worker last (no UI row, no GPU of its own — its
+        # readiness sentinel gates overall phase="ready"). The frontend never reveals "Start Call"
+        # until phase == "ready", so no real call reaches entrypoint() before every service is up,
+        # regardless of launch order.
         await _launch_vllm(llm_entry)
         await _launch_whisper(stt_entry)
         await _launch_chatterbox(tts_entry)
@@ -130,36 +140,69 @@ async def _run(llm_entry: dict, stt_entry: dict, tts_entry: dict) -> None:
         await _kill_remaining()
 
 
-async def _spawn(cmd: list[str], env: dict, log_path: Path) -> asyncio.subprocess.Process:
-    logf = open(log_path, "wb")
-    # start_new_session=True puts the child in its own process group (pgid == child pid). vLLM
-    # in particular forks a separate "VLLM::EngineCore" child that holds ALL the GPU memory and
-    # does NOT die when only its parent is signalled — a plain terminate() on the parent leaves
-    # that EngineCore orphaned (reparented to init), still holding ~13GB, which then makes the
-    # next vLLM launch fail with "Engine core initialization failed". Killing the whole process
-    # group (see _terminate_group) takes the EngineCore down with the parent. Same protection
-    # for the agent worker, which also spawns its own job-executor subprocesses.
-    return await asyncio.create_subprocess_exec(
-        *cmd, cwd=str(PROJECT_ROOT), env=env, stdout=logf, stderr=asyncio.subprocess.STDOUT,
-        start_new_session=True,
+async def _compose_up(service: str, log_path: Path, env_overrides: dict[str, str] | None = None) -> None:
+    """`docker compose up -d --build <service>` — blocks until the image is built (if needed) and
+    the container is created+started, but not until the app inside is actually ready (that's
+    _poll_until's job, via HTTP or Docker health status). Raises RuntimeError with the command's
+    own output on a hard failure (bad Dockerfile, image pull failure, Docker daemon down, etc.) —
+    distinct from the app-level failures _poll_until watches for once the container is running."""
+    env = os.environ.copy()
+    env.update(env_overrides or {})
+    proc = await asyncio.create_subprocess_exec(
+        *COMPOSE_BASE, "up", "-d", "--build", service,
+        cwd=str(PROJECT_ROOT), env=env,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
     )
+    out, _ = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"docker compose up failed for {service} (code {proc.returncode}): "
+            f"{out.decode(errors='replace')[-2000:]}"
+        )
+    await _start_log_tailer(service, log_path)
 
 
-def _terminate_group(proc: asyncio.subprocess.Process, sig: int = signal.SIGTERM) -> None:
-    """Signal the child's entire process group, so children it spawned (vLLM's EngineCore, the
-    worker's job executors) go down with it rather than orphaning and holding the GPU."""
-    if proc.returncode is not None:
-        return
+async def _start_log_tailer(service: str, log_path: Path) -> None:
+    """Best-effort: mirror the container's logs into logs/<service>.log for the same
+    tail-the-log-file debugging workflow every backend used pre-Docker. Losing this doesn't affect
+    correctness — `docker compose logs <service>` always works as a fallback."""
     try:
-        os.killpg(os.getpgid(proc.pid), sig)
-    except ProcessLookupError:
-        pass  # already gone
+        logf = open(log_path, "wb")
+        tailer = await asyncio.create_subprocess_exec(
+            *COMPOSE_BASE, "logs", "-f", "--no-color", "--since", "0s", service,
+            cwd=str(PROJECT_ROOT), stdout=logf, stderr=asyncio.subprocess.STDOUT,
+        )
+        STATE.log_tailers[service] = tailer
+    except OSError as e:
+        print(f"  Warning: couldn't start log tailer for {service}: {e}")
+
+
+async def _compose_container_id(service: str) -> str | None:
+    # -a is required: `docker compose ps -q` without it silently omits exited containers, which
+    # would make _compose_service_exited() below never actually detect a crash (it'd see "no
+    # container id" and treat that as "not exited yet" instead of failing fast) — confirmed via a
+    # real crashed container during vLLM testing, not a hypothetical.
+    proc = await asyncio.create_subprocess_exec(
+        *COMPOSE_BASE, "ps", "-a", "-q", service,
+        cwd=str(PROJECT_ROOT), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+    )
+    out, _ = await proc.communicate()
+    cid = out.decode().strip().splitlines()
+    return cid[0] if cid else None
+
+
+async def _docker_inspect_field(container_id: str, go_format: str) -> str | None:
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "inspect", "--format", go_format, container_id,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+    )
+    out, _ = await proc.communicate()
+    return out.decode().strip() or None
 
 
 async def _http_ready(port: int, path: str) -> bool:
-    # Matches run.sh's `curl -s -o /dev/null URL` semantics exactly: any successful HTTP
-    # response counts as ready, no status-code check. Don't tighten this to `status == 200` —
-    # that would diverge from the bash version's already-proven behavior.
+    # Matches run.sh's old `curl -s -o /dev/null URL` semantics: any successful HTTP response
+    # counts as ready, no status-code check.
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(
@@ -170,135 +213,137 @@ async def _http_ready(port: int, path: str) -> bool:
         return False
 
 
-async def _log_grep_ready(log_path: Path, pattern: str) -> bool:
-    try:
-        return pattern in log_path.read_text()
-    except FileNotFoundError:
+async def _docker_health_ready(service: str) -> bool:
+    """For the worker, which has no HTTP surface — readiness comes from Docker's own HEALTHCHECK
+    (Dockerfile.worker: `test -f /tmp/prewarm-ready`, written by worker.py's prewarm())."""
+    cid = await _compose_container_id(service)
+    if cid is None:
         return False
+    status = await _docker_inspect_field(cid, "{{.State.Health.Status}}")
+    return status == "healthy"
 
 
-async def _poll_until(ready_check, proc: asyncio.subprocess.Process, log_path: Path,
-                       timeout_s: float, what: str) -> None:
-    """Python analog of run.sh's `until <ready>; do if ! kill -0 $pid; then fail; fi; sleep; done`."""
+async def _compose_service_exited(service: str) -> bool:
+    """Dead-early detection — the Docker analog of the old `proc.returncode is not None` check.
+    A container with no restart: policy that crashed sits in "exited" state; a container that
+    hasn't been created yet (still building) reports no container id at all, which is NOT the
+    same as exited — don't treat "not found yet" as a failure, only an actual exited state."""
+    cid = await _compose_container_id(service)
+    if cid is None:
+        return False
+    status = await _docker_inspect_field(cid, "{{.State.Status}}")
+    return status == "exited"
+
+
+async def _poll_until(ready_check, service: str, log_path: Path, timeout_s: float, what: str) -> None:
+    """Docker analog of the old subprocess-based poll loop: watch for the container dying early,
+    watch for readiness, time out and force-stop otherwise."""
     start = time.monotonic()
     while True:
-        if proc.returncode is not None:
-            raise RuntimeError(f"{what} exited early (code {proc.returncode}) — see {log_path}")
+        if await _compose_service_exited(service):
+            raise RuntimeError(
+                f"{what} exited early — see {log_path} (or `docker compose logs {service}`)"
+            )
         if await ready_check():
             return
         if time.monotonic() - start > timeout_s:
-            _terminate_group(proc, signal.SIGKILL)  # group, so a stuck vLLM's EngineCore dies too
+            await _compose_stop(service, force=True)
             raise RuntimeError(f"{what} did not become ready within {timeout_s}s — see {log_path}")
         await asyncio.sleep(1)
 
 
-async def _launch_vllm(entry: dict) -> None:
-    env = os.environ.copy()
-    env["CUDA_HOME"] = entry["cuda_home"]
-    env["PATH"] = os.pathsep.join(
-        [f"{entry['cuda_home']}/bin", *entry.get("extra_path_dirs", []), env.get("PATH", "")]
+async def _compose_stop(service: str, force: bool = False) -> None:
+    cmd = [*COMPOSE_BASE, "kill" if force else "stop", service]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, cwd=str(PROJECT_ROOT),
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
     )
-    env["LD_LIBRARY_PATH"] = os.pathsep.join(
-        [f"{entry['cuda_home']}/lib", env.get("LD_LIBRARY_PATH", "")]
-    )
-    env.update(entry.get("extra_env", {}))
+    await proc.wait()
 
-    cmd = [
-        entry["vllm_bin"], "serve", entry["model"],
-        "--served-model-name", entry["served_model_name"],
-        *entry["launch_args"], "--port", str(entry["port"]),
-    ]
+
+async def _launch_vllm(entry: dict) -> None:
     log_path = PROJECT_ROOT / entry["log_file"]
-    proc = await _spawn(cmd, env, log_path)
-    STATE.procs["llm"] = proc
+    await _compose_up("vllm", log_path)
     await _poll_until(
         lambda: _http_ready(entry["port"], entry["readiness"]["path"]),
-        proc, log_path, entry.get("startup_timeout_s", 120), "vLLM",
+        "vllm", log_path, entry.get("startup_timeout_s", 120), "vLLM",
     )
     STATE.backends["llm"] = BackendState("ready")
 
 
 async def _launch_whisper(entry: dict) -> None:
-    """Launch the shared faster-whisper STT microservice (src/whisper_server.py) and wait for its
-    HTTP /health. Owns the "stt" backend row (previously stood in for by the worker's prewarm).
-    The model settings go in as env vars — the service reads them at module scope."""
-    env = os.environ.copy()
-    env["WHISPER_MODEL_SIZE"] = entry["model_size"]
-    env["WHISPER_COMPUTE_TYPE"] = entry["compute_type"]
-    env["WHISPER_DEVICE"] = entry["device"]
-    env["WHISPER_DEVICE_INDEX"] = str(entry["device_index"])
-    env["WHISPER_LANGUAGE"] = entry["language"]
-    env["WHISPER_NUM_WORKERS"] = str(entry.get("num_workers", 2))
-    env["WHISPER_PORT"] = str(entry["port"])
-    # faster-whisper/CTranslate2 borrows a CUDA lib dir on this box (same as the old worker did).
-    if entry.get("cuda_lib_dir"):
-        env["LD_LIBRARY_PATH"] = os.pathsep.join(
-            [entry["cuda_lib_dir"], env.get("LD_LIBRARY_PATH", "")]
-        )
-
-    cmd = [str(VENV_PY), "-u", "src/whisper_server.py"]
+    """The shared faster-whisper STT microservice — model settings flow from the confirmed config
+    entry as env var overrides on the `docker compose up` call (see docker-compose.yml's whisper
+    service, which reads them via ${VAR} interpolation)."""
+    env_overrides = {
+        "WHISPER_MODEL_SIZE": entry["model_size"],
+        "WHISPER_COMPUTE_TYPE": entry["compute_type"],
+        "WHISPER_DEVICE": entry["device"],
+        "WHISPER_DEVICE_INDEX": str(entry["device_index"]),
+        "WHISPER_LANGUAGE": entry["language"],
+        "WHISPER_NUM_WORKERS": str(entry.get("num_workers", 2)),
+    }
     log_path = PROJECT_ROOT / entry["log_file"]
-    proc = await _spawn(cmd, env, log_path)
-    STATE.procs["stt"] = proc
+    await _compose_up("whisper", log_path, env_overrides)
     await _poll_until(
         lambda: _http_ready(entry["port"], entry["readiness"]["path"]),
-        proc, log_path, entry.get("startup_timeout_s", 90), "Whisper service",
+        "whisper", log_path, entry.get("startup_timeout_s", 90), "Whisper service",
     )
     STATE.backends["stt"] = BackendState("ready")
 
 
 async def _launch_chatterbox(entry: dict) -> None:
-    cmd = [entry["python_bin"], "-u", entry["script"]]
     log_path = PROJECT_ROOT / entry["log_file"]
-    proc = await _spawn(cmd, os.environ.copy(), log_path)
-    STATE.procs["tts"] = proc
+    await _compose_up("chatterbox", log_path)
     await _poll_until(
-        lambda: _log_grep_ready(log_path, entry["readiness"]["pattern"]),
-        proc, log_path, entry.get("startup_timeout_s", 90), "Chatterbox",
+        lambda: _http_ready(entry["port"], entry["readiness"]["path"]),
+        "chatterbox", log_path, entry.get("startup_timeout_s", 90), "Chatterbox",
     )
     STATE.backends["tts"] = BackendState("ready")
 
 
 async def _launch_worker(llm_entry: dict, stt_entry: dict, tts_entry: dict) -> None:
-    """Launch the LiveKit agent worker. It reaches the three services over HTTP (URLs below), so
-    its own readiness is just prewarm (Silero VAD + RAG index, no GPU model) — it has no UI
-    backend row of its own; "Prewarm complete." simply gates overall phase="ready" (set in _run)."""
-    env = os.environ.copy()
-    env["VLLM_URL"] = f"http://localhost:{llm_entry['port']}/v1"
-    env["VLLM_MODEL"] = llm_entry["served_model_name"]
-    env["CHATTERBOX_URL"] = f"http://localhost:{tts_entry['port']}{tts_entry['url_path']}"
-    env["WHISPER_URL"] = f"http://localhost:{stt_entry['port']}{stt_entry['url_path']}"
-    env["WHISPER_LANGUAGE"] = stt_entry["language"]
+    """Launch the LiveKit agent worker container. It reaches the three services over HTTP at
+    127.0.0.1:<port> (host networking — see docker-compose.yml's worker service comment for why),
+    so its own readiness is just prewarm (Silero VAD + RAG index, no GPU model) — it has no UI
+    backend row of its own; reaching "healthy" simply gates overall phase="ready" (set in _run).
 
-    cmd = [str(VENV_PY), "-u", "src/worker.py", "start"]
+    127.0.0.1, not "localhost": confirmed live that this box's minimal container images can't
+    resolve the literal string "localhost" (its /etc/hosts has no plain entry for it, and unlike
+    the host itself they have no other NSS fallback) — 127.0.0.1 needs no name resolution at all.
+    """
+    env_overrides = {
+        "VLLM_URL": f"http://127.0.0.1:{llm_entry['port']}/v1",
+        "VLLM_MODEL": llm_entry["served_model_name"],
+        "CHATTERBOX_URL": f"http://127.0.0.1:{tts_entry['port']}{tts_entry['url_path']}",
+        "WHISPER_URL": f"http://127.0.0.1:{stt_entry['port']}{stt_entry['url_path']}",
+        "WHISPER_LANGUAGE": stt_entry["language"],
+    }
     log_path = LOGS_DIR / "worker.log"
-    proc = await _spawn(cmd, env, log_path)
-    STATE.procs["worker"] = proc
+    await _compose_up("worker", log_path, env_overrides)
     await _poll_until(
-        lambda: _log_grep_ready(log_path, "Prewarm complete."),
-        proc, log_path, stt_entry.get("startup_timeout_s", 90), "Agent worker",
+        lambda: _docker_health_ready("worker"), "worker", log_path,
+        stt_entry.get("startup_timeout_s", 90), "Agent worker",
     )
 
 
 async def _kill_remaining() -> None:
-    for proc in STATE.procs.values():
-        _terminate_group(proc)
+    for service in ("worker", "chatterbox", "whisper", "vllm"):
+        await _compose_stop(service, force=True)
 
 
 async def shutdown_all() -> None:
     """Called from token_server.py's FastAPI shutdown hook — the Python analog of run.sh's
-    cleanup() trap. Terminates worker first so it deregisters from LiveKit cleanly before its
-    backends (vLLM/Chatterbox) disappear out from under it. Signals whole process groups, not
-    just the direct children, so vLLM's EngineCore (which holds the GPU) can't be orphaned."""
-    for name in ("worker", "tts", "stt", "llm"):
-        proc = STATE.procs.get(name)
-        if proc:
-            _terminate_group(proc)
-    for proc in STATE.procs.values():
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=10)
-        except asyncio.TimeoutError:
-            _terminate_group(proc, signal.SIGKILL)
+    cleanup() trap. Stops worker first so it deregisters from LiveKit cleanly before its backends
+    (vLLM/whisper/Chatterbox) disappear out from under it. Plain `docker compose stop` (SIGTERM,
+    graceful) — no process-group-kill dance needed anymore: Docker's own cgroup-based container
+    teardown can't leak children (e.g. vLLM's EngineCore) onto the host the way raw subprocess
+    forking could, which is exactly the bug that workaround existed for pre-Docker."""
+    for tailer in STATE.log_tailers.values():
+        if tailer.returncode is None:
+            tailer.terminate()
+    for service in ("worker", "chatterbox", "whisper", "vllm"):
+        await _compose_stop(service)
 
 
 def get_status() -> dict:

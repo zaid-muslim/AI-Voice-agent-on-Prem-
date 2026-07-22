@@ -545,10 +545,16 @@ def prewarm(proc: JobProcess):
     print("Loading RAG embedding index...", flush=True)
     rag.init(DB_CONN)
     rag.warmup()
-    # src/orchestrator.py greps the worker's log for this exact string as the worker subprocess's
-    # readiness signal (gating overall phase="ready", separate from the stt/whisper-service row) —
-    # don't reword it without updating _launch_worker() there too.
     print("Prewarm complete.", flush=True)
+    # Touch a sentinel file (never deleted) as the container's readiness signal — Dockerfile.worker's
+    # HEALTHCHECK just checks existence, so "at least one prewarm has ever succeeded since container
+    # start" is enough; it doesn't need to track whether a warm process currently exists (that
+    # fluctuates as calls come and go). Bare-metal (non-Docker) runs don't have a HEALTHCHECK
+    # consumer for this, so a failed write there is harmless — don't let it crash prewarm.
+    try:
+        open("/tmp/prewarm-ready", "w").close()
+    except OSError:
+        pass
 
 
 async def entrypoint(ctx: JobContext):
@@ -637,5 +643,12 @@ if __name__ == "__main__":
             # more on demand as calls arrive); can be raised to pre-warm more once the shared
             # services' real concurrency ceiling is measured under load.
             num_idle_processes=1,
+            # Default is 10s — too tight for a cold container with no cached models yet: rag.py's
+            # embedding model (~130MB, first download only, cached in data/fastembed_cache after
+            # that — see rag.py) can take longer than that over the network, and LiveKit kills and
+            # respawns the job process on timeout, restarting the download from scratch every
+            # cycle — confirmed live, it never completed under the 10s default. 120s only matters
+            # for that first-ever run; every run after is fast once the cache is populated.
+            initialize_process_timeout=120,
         )
     )

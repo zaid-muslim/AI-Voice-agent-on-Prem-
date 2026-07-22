@@ -16,7 +16,12 @@ mkdir -p logs
 cleanup() {
     echo
     echo "Stopping services..."
-    docker compose down
+    # --profile on-demand down covers BOTH the always-on services (redis/livekit, no profile —
+    # always active regardless of --profile flags) and the on-demand ones (vllm/whisper/
+    # chatterbox/worker). This is the last safety net if orchestrator.shutdown_all() (triggered by
+    # token_server.py's own shutdown below) hasn't fully torn those down yet, e.g. Ctrl+C landing
+    # mid-launch — a bare `docker compose down` would miss the on-demand profile entirely.
+    docker compose --profile on-demand down
 }
 trap cleanup EXIT INT TERM
 

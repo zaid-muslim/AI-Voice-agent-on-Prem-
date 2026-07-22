@@ -18,3 +18,147 @@ services:
       - ./livekit.yaml:/etc/livekit.yaml:ro
     depends_on:
       - redis
+
+  # ── On-demand backends (llm/stt/tts + the agent worker) ────────────────────────────────────
+  # Not started by a bare `docker compose up -d` — src/orchestrator.py launches these individually
+  # after the browser confirms a config/models_config.json selection, matching the existing
+  # "nothing loads until confirmed" model-selection UX. profiles: [on-demand] is what keeps them
+  # out of the default `up`; every orchestrator.py call touching these MUST pass
+  # `--profile on-demand` explicitly (a known Compose inconsistency means naming the service alone
+  # doesn't reliably activate its profile across all subcommands — up/stop/logs/ps all need it).
+  #
+  # No restart: policy on any of these four — a crashed container must sit Exited so
+  # orchestrator.py's readiness polling fails fast, not silently restart underneath it.
+  #
+  # vllm/chatterbox commands are hardcoded below to match config/models_config.json's current
+  # single llm/tts entry exactly — there's only one entry per category today, so this avoids
+  # building a dynamic-YAML-generation mechanism for a multi-entry scenario that doesn't exist yet
+  # (config/models_config.json's llm/tts entries stay the readable source of truth for what these
+  # values *should* be; if they ever diverge from here, that's the bug to fix). whisper's settings
+  # DO flow from config at launch time (below), since the STT service already reads simple scalar
+  # env vars, has no list-splitting complication, and is the category most likely to see real
+  # future variation (different model size/compute type per deployment).
+  vllm:
+    image: vllm/vllm-openai:v0.25.1
+    profiles: ["on-demand"]
+    restart: "no"
+    ports:
+      - "8000:8000"
+    ipc: host  # vLLM's own docs call this out — its multiprocessing workers need shared memory
+    volumes:
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+    environment:
+      VLLM_USE_FLASHINFER_SAMPLER: "0"
+    command:
+      - "--model"
+      - "Qwen/Qwen2.5-14B-Instruct-AWQ"
+      - "--served-model-name"
+      - "qwen2.5-14b-awq"
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "hermes"
+      # 0.6, not the bare-metal 0.5: this official image's vLLM build needs more headroom for the
+      # SAME model/flags than the miniconda-installed one did — confirmed live, not assumed. At
+      # 0.5 (12GB budget), weights took 9.38GiB and only 0.83GiB was left for KV cache (needs
+      # 1.5GiB minimum) — ValueError, engine failed to start. 0.6 (~14.7GB) leaves ~3.5GiB for KV
+      # cache with real serving headroom, and still leaves ~9GB for Whisper+Chatterbox on this
+      # 24GB card.
+      - "--gpu-memory-utilization"
+      - "0.6"
+      - "--max-model-len"
+      - "8192"
+      - "--port"
+      - "8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  whisper:
+    build:
+      context: .
+      dockerfile: Dockerfile.whisper
+    profiles: ["on-demand"]
+    restart: "no"
+    ports:
+      - "8768:8768"
+    # Same HF cache dir vLLM already mounts — faster-whisper's model (Systran/faster-whisper-
+    # large-v3, ~3GB) downloads from the same HF Hub, so sharing one persisted cache across
+    # services is natural. Without this, every container recreation re-downloads from scratch —
+    # confirmed live: removing and relaunching the container blew past a 90s readiness timeout on
+    # a fresh, uncached download that had succeeded fine when the container was never removed.
+    volumes:
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+    # Set by orchestrator.py from config/models_config.json's confirmed stt entry at launch time;
+    # the defaults here match that entry's current values (fallback for a manual `docker compose
+    # up whisper` outside the orchestrator, e.g. for standalone image testing).
+    environment:
+      WHISPER_MODEL_SIZE: ${WHISPER_MODEL_SIZE:-large-v3}
+      WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-int8_float16}
+      WHISPER_DEVICE: ${WHISPER_DEVICE:-cuda}
+      WHISPER_DEVICE_INDEX: ${WHISPER_DEVICE_INDEX:-0}
+      WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-en}
+      WHISPER_NUM_WORKERS: ${WHISPER_NUM_WORKERS:-2}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  chatterbox:
+    # Build context is the sibling Pipeline/ project (its own repo) — same cross-project
+    # dependency the bare-metal launch already had via python_bin/script pointing at
+    # ../Pipeline/.chatterbox-venv and ../Pipeline/src/chatterbox_server.py.
+    build:
+      context: ../Pipeline
+      dockerfile: Dockerfile.chatterbox
+    profiles: ["on-demand"]
+    restart: "no"
+    ports:
+      - "8766:8766"
+    # Same reasoning as whisper's HF cache mount above: ChatterboxTurboTTS.from_pretrained() also
+    # downloads via HF Hub — mount the same persisted cache so a container recreation doesn't
+    # re-download from scratch and risk blowing past the readiness timeout.
+    volumes:
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    profiles: ["on-demand"]
+    restart: "no"
+    # Host networking: the worker's job-executor joins LiveKit rooms as a real WebRTC participant
+    # (same reason LiveKit itself needs it) — on a bridge network it would gather ICE candidates on
+    # an unreachable Docker-internal IP and media would silently fail while dispatch still looked
+    # fine. No GPU reservation: after the shared-Whisper change, prewarm() only loads Silero VAD
+    # (CPU) — the worker holds no GPU model anymore. Because it's on host networking, it reaches
+    # vllm/whisper/chatterbox at the same 127.0.0.1:<port> ports bare-metal used — those three stay
+    # on ordinary bridge networking with published ports, so "host publishes to that port" holds.
+    # Use 127.0.0.1, not "localhost": this box's /etc/hosts has no plain "localhost" entry
+    # (confirmed live — the worker's LiveKit connection failed resolving "localhost" and succeeded
+    # on 127.0.0.1; bare-metal processes apparently resolve it via a different, host-level-only
+    # mechanism that this minimal container image doesn't have).
+    network_mode: host
+    environment:
+      VLLM_URL: ${VLLM_URL:-http://127.0.0.1:8000/v1}
+      VLLM_MODEL: ${VLLM_MODEL:-qwen2.5-14b-awq}
+      CHATTERBOX_URL: ${CHATTERBOX_URL:-http://127.0.0.1:8766/synthesize}
+      WHISPER_URL: ${WHISPER_URL:-http://127.0.0.1:8768/transcribe}
+      WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-en}
+    volumes:
+      - ./config:/app/config:ro
+      - ./data:/app/data
+      - ./.env:/app/.env:ro

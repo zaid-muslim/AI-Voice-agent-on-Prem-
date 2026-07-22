@@ -1,0 +1,23 @@
+# LiveKit agent worker (src/worker.py). No CUDA base needed: after the shared-Whisper change,
+# prewarm() only loads Silero VAD (CPU) — the worker holds no GPU model of its own anymore, it
+# reaches vLLM/whisper/Chatterbox over HTTP.
+FROM python:3.11-slim
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY src/ src/
+
+# config/ and data/ are volume-mounted (see docker-compose.yml), not baked in: data/rag_index.npy
+# is a regenerable, gitignored artifact and data/bank.db + memory.json are mutable runtime state
+# that must survive image rebuilds.
+
+# Readiness sentinel: worker.py's prewarm() touches this file once its first successful prewarm
+# finishes (Silero VAD + RAG index load). Checking for existence, not freshness, matches
+# orchestrator.py's readiness need — "has this container ever finished a prewarm" — rather than
+# "is there a warm idle process right now" (which fluctuates as calls come and go).
+HEALTHCHECK --interval=5s --timeout=3s --start-period=60s --retries=3 \
+    CMD test -f /tmp/prewarm-ready || exit 1
+
+CMD ["python", "-u", "src/worker.py", "start"]

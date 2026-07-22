@@ -1,0 +1,26 @@
+# Shared faster-whisper STT microservice (src/whisper_server.py).
+#
+# CUDA 12.4 + cuDNN 9 base is a deliberate pairing, not just "matches the rest of the stack":
+# faster-whisper's backend is CTranslate2, which >=4.5 hard-requires cuDNN 9 with no soft fallback
+# — a mismatched major version is a load failure, not a slow path. Confirmed against Docker Hub
+# that 12.4.1-cudnn-runtime-ubuntu22.04 is a real tag bundling cuDNN 9.x for the 12.4.x line.
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3.11 python3.11-venv python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements.txt .
+# Only faster-whisper's own dependency chain is actually needed here, but installing the shared
+# requirements.txt keeps this image's deps in lockstep with the worker's — same source of truth,
+# no separate pin list to drift.
+RUN python3.11 -m pip install --no-cache-dir -r requirements.txt
+
+COPY src/whisper_server.py src/whisper_server.py
+
+EXPOSE 8768
+HEALTHCHECK --interval=10s --timeout=5s --start-period=120s --retries=3 \
+    CMD python3.11 -c "import urllib.request; urllib.request.urlopen('http://localhost:8768/health', timeout=2)" || exit 1
+
+CMD ["python3.11", "-u", "src/whisper_server.py"]
