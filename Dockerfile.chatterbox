@@ -1,0 +1,27 @@
+# Chatterbox Turbo TTS microservice (src/chatterbox_server.py).
+#
+# Base chosen to match the exact torch/CUDA/cuDNN combo already proven working in the live
+# .chatterbox-venv (torch==2.6.0+cu124, cuDNN 90100) — confirmed against Docker Hub that
+# pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime is a real tag bundling that pairing, so torch/
+# torchaudio don't need a separate pip install (see requirements-chatterbox.txt).
+FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements-chatterbox.txt .
+RUN pip install --no-cache-dir -r requirements-chatterbox.txt
+
+COPY src/chatterbox_server.py src/chatterbox_server.py
+# Whole directory, not just one file: CHATTERBOX_VOICE_FILE (chatterbox_server.py) picks a specific
+# .wav from here at runtime, so a pool of instances can each get a different voice from the same
+# image without a separate build per voice. Fixed, small reference assets — not runtime-mutable
+# state, fine to bake into the image.
+COPY assets/voice_seed/ assets/voice_seed/
+
+EXPOSE 8766
+HEALTHCHECK --interval=10s --timeout=5s --start-period=60s --retries=3 \
+    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8766/health', timeout=2)" || exit 1
+
+CMD ["python", "-u", "src/chatterbox_server.py"]

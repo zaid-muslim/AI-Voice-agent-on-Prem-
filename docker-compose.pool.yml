@@ -1,13 +1,14 @@
 # Box 2's Whisper + Chatterbox pool — no worker here (see plans/ for why: workers all run on box
 # 1 so every caller gets uniform access to data/bank.db and data/rag_index.npy; box 2 hosts
-# stateless pool services only). Reuses the exact same Dockerfile.whisper and
-# ../Pipeline/Dockerfile.chatterbox images already proven on box 1 — build once (whisper-1/
-# chatterbox-1), tag it, and the other instances just reference the tag instead of rebuilding.
+# stateless pool services only). Reuses the exact same Dockerfile.whisper and Dockerfile.chatterbox
+# images already proven on box 1 — build once (whisper-1/chatterbox-1), tag it, and the other
+# instances just reference the tag instead of rebuilding. Both Dockerfiles and their build context
+# (chatterbox_server.py, voice_seed/) live entirely inside Livekit Pipeline/ — no dependency on the
+# sibling Pipeline/ repo, so box 2 doesn't need that directory synced at all.
 #
 # Deployed via sync-to-box2.sh into ~/box2-pool-node/ — this file itself lives at the TOP of that
-# directory (a sibling of both Livekit Pipeline/ and Pipeline/, not nested inside either), so the
-# `context: ./Livekit Pipeline` / `context: ./Pipeline` build paths below resolve correctly from
-# there.
+# directory (a sibling of the synced Livekit Pipeline/, not nested inside it), so the
+# `context: ./Livekit Pipeline` build paths below resolve correctly from there.
 #
 # No host networking needed for any of these — neither Whisper nor Chatterbox is a WebRTC peer,
 # both are plain single-port HTTP servers. Bridge networking + published ports is correctly
@@ -92,15 +93,15 @@ services:
               count: 1
               capabilities: [gpu]
 
-  # Each instance gets a different voice (CHATTERBOX_VOICE_FILE — filename in Pipeline/assets/
-  # voice_seed/, baked into the image) so different callers hear a different-sounding agent,
+  # Each instance gets a different voice (CHATTERBOX_VOICE_FILE — filename in Livekit Pipeline/
+  # assets/voice_seed/, baked into the image) so different callers hear a different-sounding agent,
   # matching whichever instance the round-robin counter sent them to. Only 3 reference clips exist
   # today (trump/female/male); chatterbox-3 reuses trump for lack of a 4th distinct file — drop a
-  # new .wav into Pipeline/assets/voice_seed/, add it to sync-to-box2.sh, and repoint
+  # new .wav into Livekit Pipeline/assets/voice_seed/, add it to sync-to-box2.sh, and repoint
   # CHATTERBOX_VOICE_FILE here to add real variety instead of the reuse.
   chatterbox-1:
     build:
-      context: ./Pipeline
+      context: ./Livekit Pipeline
       dockerfile: Dockerfile.chatterbox
     image: box2-pool-chatterbox:latest
     restart: "no"

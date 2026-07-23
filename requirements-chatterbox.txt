@@ -1,0 +1,16 @@
+# Exact versions pulled from the live .chatterbox-venv's dist-info folders (a uv-managed venv
+# with no pip installed inside it, so `pip freeze` wasn't available — confirmed via
+# `ls .chatterbox-venv/lib/python3.11/site-packages/ | grep dist-info`).
+#
+# torch/torchaudio deliberately NOT listed here: the Docker base image
+# (pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime) already bundles matching copies
+# (torch==2.6.0+cu124, cuDNN 90100, verified against the live venv). Re-pinning the +cu124 local
+# version here would need --index-url https://download.pytorch.org/whl/cu124 to even resolve —
+# redundant at best, a broken install at worst.
+chatterbox-tts==0.1.7
+fastapi==0.139.0
+numpy==1.26.4
+pydantic==2.13.4
+soundfile==0.14.0
+transformers==5.2.0
+uvicorn==0.49.0

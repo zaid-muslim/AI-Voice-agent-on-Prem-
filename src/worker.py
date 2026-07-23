@@ -54,8 +54,8 @@ load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 # values never clobber what the orchestrator already set, they only apply when nothing else has.
 VLLM_URL = os.environ.get("VLLM_URL", "http://localhost:8000/v1")
 VLLM_MODEL = os.environ.get("VLLM_MODEL", "qwen2.5-14b-awq")
-# STT/TTS are shared HTTP microservices (src/whisper_server.py, ../Pipeline/src/
-# chatterbox_server.py), not per-process models — the job-executor process holds no GPU model of
+# STT/TTS are shared HTTP microservices (src/whisper_server.py, src/chatterbox_server.py), not
+# per-process models — the job-executor process holds no GPU model of
 # its own (that per-call GPU copy is what OOM'd the 2nd concurrent caller pre-Phase-1). Each is
 # now a *pool* — one or more instances, comma-separated, possibly spanning multiple boxes (see
 # orchestrator.py's _launch_worker, which builds this from config/models_config.json's confirmed

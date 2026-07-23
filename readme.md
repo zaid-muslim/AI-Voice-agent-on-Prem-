@@ -46,14 +46,21 @@ Browser  ──WebRTC──▶  LiveKit SFU (box 1, Docker)
   screen first; only after you confirm an LLM/STT/TTS choice does `src/orchestrator.py` actually
   start anything, per `config/models_config.json`.
 - **The GPU-heavy backends run in Docker** (`docker-compose.yml`, `Dockerfile.whisper`,
-  `Dockerfile.worker`, `../Pipeline/Dockerfile.chatterbox`, and box 2's `docker-compose.pool.yml`)
-  — `orchestrator.py` launches box 1's on demand and polls `/health` for readiness. This isolates
+  `Dockerfile.chatterbox`, `Dockerfile.worker`, and box 2's `docker-compose.pool.yml`) —
+  `orchestrator.py` launches box 1's on demand and polls `/health` for readiness. This isolates
   their dependencies (CUDA/cuDNN versions, Python packages) from anything else on the host, and
   from other unrelated projects sharing the same GPU box (box 2 runs several).
+- **This repo is fully self-contained — it doesn't build against the sibling `Pipeline/` repo.**
+  `chatterbox_server.py`, `Dockerfile.chatterbox`, and `assets/voice_seed/` all live here as a
+  deliberate *copy* of the originals in `Pipeline/` (the pre-LiveKit bare-metal assistant, which
+  keeps its own independent copy and still uses it directly). The two are meant to be able to
+  diverge — each pipeline is independently deployable without the other's directory present at
+  all, at the cost of the two `chatterbox_server.py` copies needing manual sync if one is
+  improved and the fix is relevant to both.
 - **Each Chatterbox instance can have a different voice** (`CHATTERBOX_VOICE_FILE`, baked into the
-  image from `Pipeline/assets/voice_seed/`) — since a call keeps the same pool member for its whole
-  duration, one caller always hears one consistent voice, but different concurrent callers can hear
-  different-sounding agents.
+  image from this repo's own `assets/voice_seed/`) — since a call keeps the same pool member for
+  its whole duration, one caller always hears one consistent voice, but different concurrent
+  callers can hear different-sounding agents.
 
 ## Domain config
 
@@ -69,7 +76,9 @@ src/            worker.py (LiveKit agent — STT/LLM/TTS orchestration per call,
                 token_server.py (auth + model-picker + static web/ host),
                 orchestrator.py (launches/tears down box 1's backends via Docker Compose),
                 whisper_server.py + whisper_stt.py (shared STT service + its client plugin),
-                chatterbox_tts.py (TTS client plugin — server lives in ../Pipeline/src/),
+                chatterbox_server.py + chatterbox_tts.py (shared TTS service + its client plugin —
+                both live here; chatterbox_server.py is a deliberate copy of the one in the
+                sibling Pipeline/ repo, see Architecture),
                 banking.py, db.py, rag.py, convo_log.py, build_index.py, seed_db.py, show_db.py
 web/            Browser frontend (livekit-client) — index.html, vendor/
 config/         bank_config.json (swappable domain config), models_config.json (backend
@@ -77,10 +86,14 @@ config/         bank_config.json (swappable domain config), models_config.json (
                 box 2's Whisper/Chatterbox pool members), rag_docs/
 data/           bank.db, memory.json, rag_index.npy, fastembed_cache/ — gitignored,
                 regenerable/mutable, box 1 only (see Concurrency: why workers stay on box 1)
-docker-compose.yml, docker-compose.pool.yml, Dockerfile.whisper, Dockerfile.worker
+assets/voice_seed/  Chatterbox reference clips (.wav) — CHATTERBOX_VOICE_FILE picks one per pool
+                instance at build/run time
+docker-compose.yml, docker-compose.pool.yml, Dockerfile.whisper, Dockerfile.chatterbox,
+Dockerfile.worker
                 Container definitions — docker-compose.yml is box 1 (see Architecture above);
                 docker-compose.pool.yml is box 2's standalone Whisper/Chatterbox pool (deployed via
-                ../sync-to-box2.sh into ~/box2-pool-node/ there, not part of this checkout's tree)
+                ../sync-to-box2.sh into ~/box2-pool-node/ there, not part of this checkout's tree).
+                All build contexts resolve within this repo — no cross-repo dependency on Pipeline/
 livekit.yaml    Self-hosted LiveKit server config
 tests/          pytest suite (banking/RAG logic)
 plans/          Design/planning docs
@@ -188,21 +201,22 @@ both — e.g. first-time setup, or SSH access genuinely isn't available — the 
 apply, but the underlying steps are simple manual copies:
 
 **On box 1** (the LiveKit server + vLLM + the agent worker + its own Whisper/Chatterbox instance):
-1. Copy this `Livekit Pipeline/` directory and the sibling `Pipeline/` directory onto box 1 (USB
-   drive, local network share, `git clone` — anything that isn't SSH from elsewhere), keeping them
-   as siblings (same relative layout as this checkout).
+1. Copy this `Livekit Pipeline/` directory onto box 1 (USB drive, local network share, `git
+   clone` — anything that isn't SSH from elsewhere). It's self-contained — no need to also copy
+   the sibling `Pipeline/` repo unless you're separately setting up the original bare-metal
+   assistant there too, which this guide doesn't cover.
 2. Follow the *Prerequisites* above on that machine, then `cd "Livekit Pipeline" && ./run.sh`.
 3. Open `http://localhost:3000` in a browser **on box 1 itself** (or box 1's own LAN/Tailscale
    address from another device on the same network), pick models, confirm.
 
 **On box 2** (just the Whisper/Chatterbox pool — no LiveKit, no worker, no `config/`/`data/`):
 1. Copy only what's needed to build the two pool images, preserving this exact relative layout —
-   `docker-compose.pool.yml` at the top level, with `Livekit Pipeline/` and `Pipeline/` as siblings
-   beneath it (mirrors what `../sync-to-box2.sh` pushes over SSH; see that script's own comments
-   for the precise file list — `Dockerfile.whisper` + `requirements.txt` +
-   `src/whisper_server.py`, and `Pipeline/Dockerfile.chatterbox` +
-   `Pipeline/requirements-chatterbox.txt` + `Pipeline/src/chatterbox_server.py` +
-   `Pipeline/assets/voice_seed/*.wav`).
+   `docker-compose.pool.yml` at the top level, with `Livekit Pipeline/` as a sibling beneath it
+   (mirrors what `../sync-to-box2.sh` pushes over SSH; see that script's own comments for the
+   precise file list — `Dockerfile.whisper` + `Dockerfile.chatterbox` + `requirements.txt` +
+   `requirements-chatterbox.txt` + `src/whisper_server.py` + `src/chatterbox_server.py` +
+   `assets/voice_seed/*.wav`, all under `Livekit Pipeline/`). No `Pipeline/` directory needed on
+   box 2 at all.
 2. Follow the *Prerequisites* above on that machine, then from the directory containing
    `docker-compose.pool.yml`: `docker compose -f docker-compose.pool.yml up -d`.
 3. **Back on box 1**, edit `config/models_config.json`'s `stt`/`tts` entries — `extra_pool_urls`

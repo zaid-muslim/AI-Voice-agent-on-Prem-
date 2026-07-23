@@ -2,7 +2,7 @@
 """Shared faster-whisper STT microservice.
 
 One WhisperModel loaded once, serving every concurrent call over HTTP — the STT analog of the
-Chatterbox TTS microservice (../Pipeline/src/chatterbox_server.py). This replaces loading a
+Chatterbox TTS microservice (src/chatterbox_server.py). This replaces loading a
 separate WhisperModel inside each LiveKit job-executor process (worker.py's old prewarm()), which
 put one full Whisper on the GPU per concurrent call and OOM'd the second caller. Now the per-call
 process holds no STT model at all — it just POSTs utterance audio here.

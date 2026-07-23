@@ -111,11 +111,12 @@ services:
               capabilities: [gpu]
 
   chatterbox:
-    # Build context is the sibling Pipeline/ project (its own repo) — same cross-project
-    # dependency the bare-metal launch already had via python_bin/script pointing at
-    # ../Pipeline/.chatterbox-venv and ../Pipeline/src/chatterbox_server.py.
+    # Self-contained: chatterbox_server.py + Dockerfile.chatterbox + voice_seed/ are this repo's
+    # own copy, not a cross-project build context into the sibling Pipeline/ repo. Deliberate
+    # duplication, not an oversight — Pipeline/'s own bare-metal server still uses its copy of
+    # chatterbox_server.py independently, and the two are meant to be able to diverge.
     build:
-      context: ../Pipeline
+      context: .
       dockerfile: Dockerfile.chatterbox
     profiles: ["on-demand"]
     restart: "no"
