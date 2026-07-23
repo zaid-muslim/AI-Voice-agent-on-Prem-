@@ -10,6 +10,10 @@ livekit-agents>=1.6
 livekit-plugins-openai>=1.6   # LLM plugin, pointed at vLLM's OpenAI-compatible endpoint
 livekit-plugins-silero>=1.6   # default VAD
 python-dotenv>=1.0
+redis>=5.0               # round-robin pool-selection counter (redis.asyncio) — reuses the Redis
+                          # already deployed for LiveKit itself, not a new service dependency
+
+
 
 # Token server (Phase 1 web surface)
 livekit-api>=1.2

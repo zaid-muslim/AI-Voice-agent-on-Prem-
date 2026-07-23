@@ -303,20 +303,30 @@ async def _launch_chatterbox(entry: dict) -> None:
 
 
 async def _launch_worker(llm_entry: dict, stt_entry: dict, tts_entry: dict) -> None:
-    """Launch the LiveKit agent worker container. It reaches the three services over HTTP at
-    127.0.0.1:<port> (host networking — see docker-compose.yml's worker service comment for why),
-    so its own readiness is just prewarm (Silero VAD + RAG index, no GPU model) — it has no UI
-    backend row of its own; reaching "healthy" simply gates overall phase="ready" (set in _run).
+    """Launch the LiveKit agent worker container. It reaches vLLM over HTTP at 127.0.0.1:<port>
+    (host networking — see docker-compose.yml's worker service comment for why), and reaches
+    Whisper/Chatterbox as a *pool* — box 1's own local instance plus any extra_pool_urls from
+    config/models_config.json (box 2's instances, over the LAN) — so its own readiness is just
+    prewarm (Silero VAD + RAG index, no GPU model); it has no UI backend row of its own, reaching
+    "healthy" simply gates overall phase="ready" (set in _run). All workers run on box 1 by
+    design (not box 2) — see plans/ for why: it's what gives every caller uniform access to
+    data/bank.db and data/rag_index.npy, regardless of which pool member handles their STT/TTS.
 
     127.0.0.1, not "localhost": confirmed live that this box's minimal container images can't
     resolve the literal string "localhost" (its /etc/hosts has no plain entry for it, and unlike
     the host itself they have no other NSS fallback) — 127.0.0.1 needs no name resolution at all.
     """
+    whisper_urls = [f"http://127.0.0.1:{stt_entry['port']}{stt_entry['url_path']}"] + stt_entry.get(
+        "extra_pool_urls", []
+    )
+    chatterbox_urls = [f"http://127.0.0.1:{tts_entry['port']}{tts_entry['url_path']}"] + tts_entry.get(
+        "extra_pool_urls", []
+    )
     env_overrides = {
         "VLLM_URL": f"http://127.0.0.1:{llm_entry['port']}/v1",
         "VLLM_MODEL": llm_entry["served_model_name"],
-        "CHATTERBOX_URL": f"http://127.0.0.1:{tts_entry['port']}{tts_entry['url_path']}",
-        "WHISPER_URL": f"http://127.0.0.1:{stt_entry['port']}{stt_entry['url_path']}",
+        "CHATTERBOX_URLS": ",".join(chatterbox_urls),
+        "WHISPER_URLS": ",".join(whisper_urls),
         "WHISPER_LANGUAGE": stt_entry["language"],
     }
     log_path = LOGS_DIR / "worker.log"

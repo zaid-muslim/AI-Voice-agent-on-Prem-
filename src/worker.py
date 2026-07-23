@@ -13,6 +13,7 @@ import time
 from datetime import datetime
 
 import aiohttp
+import redis.asyncio as aioredis
 from dotenv import load_dotenv
 
 from livekit.agents import (
@@ -53,13 +54,23 @@ load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 # values never clobber what the orchestrator already set, they only apply when nothing else has.
 VLLM_URL = os.environ.get("VLLM_URL", "http://localhost:8000/v1")
 VLLM_MODEL = os.environ.get("VLLM_MODEL", "qwen2.5-14b-awq")
-CHATTERBOX_URL = os.environ.get("CHATTERBOX_URL", "http://localhost:8766/synthesize")
-# STT is now a shared HTTP microservice (src/whisper_server.py), not a per-process model — the
-# job-executor process holds no Whisper at all (that per-call GPU copy is what OOM'd the 2nd
-# concurrent caller). Only the service URL + language live here; the model size/compute/device
-# settings live on the whisper *service*, set from config/models_config.json's stt entry.
-WHISPER_URL = os.environ.get("WHISPER_URL", "http://localhost:8768/transcribe")
+# STT/TTS are shared HTTP microservices (src/whisper_server.py, ../Pipeline/src/
+# chatterbox_server.py), not per-process models — the job-executor process holds no GPU model of
+# its own (that per-call GPU copy is what OOM'd the 2nd concurrent caller pre-Phase-1). Each is
+# now a *pool* — one or more instances, comma-separated, possibly spanning multiple boxes (see
+# orchestrator.py's _launch_worker, which builds this from config/models_config.json's confirmed
+# entry + its extra_pool_urls). A single URL with no comma works fine too (today's box-1-only
+# case). WHISPER_LANGUAGE stays a single value — same for every pool member.
+CHATTERBOX_URLS = [
+    u.strip() for u in os.environ.get("CHATTERBOX_URLS", "http://localhost:8766/synthesize").split(",") if u.strip()
+]
+WHISPER_URLS = [
+    u.strip() for u in os.environ.get("WHISPER_URLS", "http://localhost:8768/transcribe").split(",") if u.strip()
+]
 WHISPER_LANGUAGE = os.environ.get("WHISPER_LANGUAGE", "en")
+# Redis already backs LiveKit itself in this stack (see docker-compose.yml) — reused here purely
+# as an atomic counter for round-robin pool selection, not for anything LiveKit-related.
+REDIS_URL = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
 SEARXNG_URL = "http://localhost:1234/search"
 WEB_SEARCH_RESULT_COUNT = 4
 RAG_INJECT_TOP_K = 4
@@ -557,16 +568,41 @@ def prewarm(proc: JobProcess):
         pass
 
 
+async def _pick_pool_url(urls: list[str], counter_key: str) -> str:
+    """Round-robin pool selection via a Redis atomic counter, picked once per call (not once per
+    request) — the same chosen URL is reused for a call's entire duration, so a caller hears one
+    consistent voice throughout, never a mid-call switch. Redis INCR is atomic across concurrent
+    callers (each call is its own OS process, no shared memory to keep a counter in), so N
+    simultaneous new calls deterministically land on N different pool members whenever concurrent
+    calls <= pool size — not just statistically likely, the way independent random picks would be.
+    No fallback for Redis being unreachable: it's already a hard dependency for LiveKit itself in
+    this stack, so this code path failing isn't a new fragility.
+    """
+    if len(urls) == 1:
+        return urls[0]
+    client = aioredis.from_url(REDIS_URL)
+    try:
+        idx = await client.incr(counter_key)
+        picked = urls[idx % len(urls)]
+        print(f"[pool] {counter_key}={idx} -> {picked}", flush=True)
+        return picked
+    finally:
+        await client.aclose()
+
+
 async def entrypoint(ctx: JobContext):
     await ctx.connect()
 
     agent = BankReceptionistAgent(session_id=ctx.room.name)
 
+    whisper_url = await _pick_pool_url(WHISPER_URLS, "whisper_pool_idx")
+    chatterbox_url = await _pick_pool_url(CHATTERBOX_URLS, "chatterbox_pool_idx")
+
     session = AgentSession(
         vad=ctx.proc.userdata["vad"],
-        stt=WhisperSTT(url=WHISPER_URL, language=WHISPER_LANGUAGE),
+        stt=WhisperSTT(url=whisper_url, language=WHISPER_LANGUAGE),
         llm=openai.LLM(model=VLLM_MODEL, base_url=VLLM_URL, api_key="not-needed"),
-        tts=ChatterboxTTS(url=CHATTERBOX_URL),
+        tts=ChatterboxTTS(url=chatterbox_url),
         userdata={"failed_card_attempts": 0},
     )
 
@@ -639,10 +675,12 @@ if __name__ == "__main__":
             # Now that STT is a shared microservice (whisper_server.py), a job process no longer
             # loads a Whisper onto the GPU — prewarm is just Silero VAD (CPU) + the RAG index
             # (~2GB RAM/process, no GPU). So concurrent calls no longer OOM the GPU; extra warm
-            # processes cost host RAM, not VRAM. Kept at 1 warm process for now (LiveKit spawns
-            # more on demand as calls arrive); can be raised to pre-warm more once the shared
-            # services' real concurrency ceiling is measured under load.
-            num_idle_processes=1,
+            # processes cost host RAM, not VRAM. Was pinned to 1 during the pre-shared-Whisper
+            # design (VRAM-constrained then); that constraint is gone, so this now just matches
+            # livekit-agents' own production default (4) instead of a stale override — revisit
+            # again once the shared services + all-workers-on-one-box concurrency ceiling is
+            # actually load-tested (see plans/), rather than picking a number twice from guesswork.
+            num_idle_processes=12,
             # Default is 10s — too tight for a cold container with no cached models yet: rag.py's
             # embedding model (~130MB, first download only, cached in data/fastembed_cache after
             # that — see rag.py) can take longer than that over the network, and LiveKit kills and

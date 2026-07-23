@@ -1,0 +1,155 @@
+# Box 2's Whisper + Chatterbox pool — no worker here (see plans/ for why: workers all run on box
+# 1 so every caller gets uniform access to data/bank.db and data/rag_index.npy; box 2 hosts
+# stateless pool services only). Reuses the exact same Dockerfile.whisper and
+# ../Pipeline/Dockerfile.chatterbox images already proven on box 1 — build once (whisper-1/
+# chatterbox-1), tag it, and the other instances just reference the tag instead of rebuilding.
+#
+# Deployed via sync-to-box2.sh into ~/box2-pool-node/ — this file itself lives at the TOP of that
+# directory (a sibling of both Livekit Pipeline/ and Pipeline/, not nested inside either), so the
+# `context: ./Livekit Pipeline` / `context: ./Pipeline` build paths below resolve correctly from
+# there.
+#
+# No host networking needed for any of these — neither Whisper nor Chatterbox is a WebRTC peer,
+# both are plain single-port HTTP servers. Bridge networking + published ports is correctly
+# isolated and, for a pool where distinct ports matter for the round-robin URL list anyway, the
+# more natural fit.
+#
+# Ports: box 1 already uses 8768 (whisper) / 8766 (chatterbox) for its own single instance — box
+# 2's ports don't need to avoid colliding with box 1's (different machine, different IP), only
+# with each other. Picked 8768-8770 for whisper and 8771-8773 for chatterbox to keep them
+# visually distinct and match config/models_config.json's extra_pool_urls.
+#
+# restart: "no" while this is still being verified (a crashed instance should sit Exited and
+# visible, not silently loop-restart and mask a real problem) — switch to unless-stopped once
+# proven, matching box 1's on-demand services' own convention.
+services:
+  whisper-1:
+    build:
+      context: ./Livekit Pipeline
+      dockerfile: Dockerfile.whisper
+    image: box2-pool-whisper:latest
+    restart: "no"
+    ports:
+      - "8768:8768"
+    environment:
+      WHISPER_MODEL_SIZE: large-v3
+      WHISPER_COMPUTE_TYPE: int8_float16
+      WHISPER_DEVICE: cuda
+      WHISPER_DEVICE_INDEX: "0"
+      WHISPER_LANGUAGE: en
+      WHISPER_NUM_WORKERS: "2"
+    volumes:
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  whisper-2:
+    image: box2-pool-whisper:latest  # same image as whisper-1, no build: — just run it again
+    restart: "no"
+    ports:
+      - "8769:8768"
+    environment:
+      WHISPER_MODEL_SIZE: large-v3
+      WHISPER_COMPUTE_TYPE: int8_float16
+      WHISPER_DEVICE: cuda
+      WHISPER_DEVICE_INDEX: "0"
+      WHISPER_LANGUAGE: en
+      WHISPER_NUM_WORKERS: "2"
+    volumes:
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  whisper-3:
+    image: box2-pool-whisper:latest
+    restart: "no"
+    ports:
+      - "8770:8768"
+    environment:
+      WHISPER_MODEL_SIZE: large-v3
+      WHISPER_COMPUTE_TYPE: int8_float16
+      WHISPER_DEVICE: cuda
+      WHISPER_DEVICE_INDEX: "0"
+      WHISPER_LANGUAGE: en
+      WHISPER_NUM_WORKERS: "2"
+    volumes:
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # Each instance gets a different voice (CHATTERBOX_VOICE_FILE — filename in Pipeline/assets/
+  # voice_seed/, baked into the image) so different callers hear a different-sounding agent,
+  # matching whichever instance the round-robin counter sent them to. Only 3 reference clips exist
+  # today (trump/female/male); chatterbox-3 reuses trump for lack of a 4th distinct file — drop a
+  # new .wav into Pipeline/assets/voice_seed/, add it to sync-to-box2.sh, and repoint
+  # CHATTERBOX_VOICE_FILE here to add real variety instead of the reuse.
+  chatterbox-1:
+    build:
+      context: ./Pipeline
+      dockerfile: Dockerfile.chatterbox
+    image: box2-pool-chatterbox:latest
+    restart: "no"
+    ports:
+      - "8771:8766"
+    environment:
+      CHATTERBOX_VOICE_FILE: reference_female.wav
+    # Same reasoning as box 1's chatterbox service: ChatterboxTurboTTS.from_pretrained() downloads
+    # via HF Hub — without a persisted cache, every container recreation re-downloads from scratch.
+    volumes:
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  chatterbox-2:
+    image: box2-pool-chatterbox:latest
+    restart: "no"
+    ports:
+      - "8772:8766"
+    environment:
+      CHATTERBOX_VOICE_FILE: reference_male.wav
+    volumes:
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  chatterbox-3:
+    image: box2-pool-chatterbox:latest
+    restart: "no"
+    ports:
+      - "8773:8766"
+    environment:
+      CHATTERBOX_VOICE_FILE: reference_trump.wav
+    volumes:
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

@@ -30,7 +30,12 @@
       "log_file": "logs/whisper.log",
       "readiness": { "type": "http", "path": "/health" },
       "startup_timeout_s": 90,
-      "max_concurrent_calls": 3
+      "max_concurrent_calls": 12,
+      "extra_pool_urls": [
+        "http://192.168.18.16:8768/transcribe",
+        "http://192.168.18.16:8769/transcribe",
+        "http://192.168.18.16:8770/transcribe"
+      ]
     }
   ],
   "tts": [
@@ -41,7 +46,12 @@
       "url_path": "/synthesize",
       "log_file": "logs/chatterbox.log",
       "readiness": { "type": "http", "path": "/health" },
-      "startup_timeout_s": 90
+      "startup_timeout_s": 90,
+      "extra_pool_urls": [
+        "http://192.168.18.16:8771/synthesize",
+        "http://192.168.18.16:8772/synthesize",
+        "http://192.168.18.16:8773/synthesize"
+      ]
     }
   ]
 }

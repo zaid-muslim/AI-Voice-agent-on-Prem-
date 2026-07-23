@@ -126,6 +126,11 @@ services:
     # re-download from scratch and risk blowing past the readiness timeout.
     volumes:
       - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+    # Explicit even though it matches chatterbox_server.py's own default — box 1's instance is now
+    # one member of a pool where each instance can have a different voice (see docker-compose.pool
+    # .yml on box 2), so naming it here documents which voice this particular member uses.
+    environment:
+      CHATTERBOX_VOICE_FILE: reference_trump.wav
     deploy:
       resources:
         reservations:
@@ -155,9 +160,14 @@ services:
     environment:
       VLLM_URL: ${VLLM_URL:-http://127.0.0.1:8000/v1}
       VLLM_MODEL: ${VLLM_MODEL:-qwen2.5-14b-awq}
-      CHATTERBOX_URL: ${CHATTERBOX_URL:-http://127.0.0.1:8766/synthesize}
-      WHISPER_URL: ${WHISPER_URL:-http://127.0.0.1:8768/transcribe}
+      # Comma-separated pool — orchestrator.py sets these to box 1's own instance plus any
+      # extra_pool_urls from config/models_config.json (box 2's instances); the single-URL
+      # defaults here are the fallback for a manual `docker compose up worker` outside the
+      # orchestrator, e.g. for standalone testing.
+      CHATTERBOX_URLS: ${CHATTERBOX_URLS:-http://127.0.0.1:8766/synthesize}
+      WHISPER_URLS: ${WHISPER_URLS:-http://127.0.0.1:8768/transcribe}
       WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-en}
+      REDIS_URL: ${REDIS_URL:-redis://127.0.0.1:6379}
     volumes:
       - ./config:/app/config:ro
       - ./data:/app/data
