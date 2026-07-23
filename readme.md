@@ -73,14 +73,14 @@ the moment a call connects, using the same LLM+TTS pipeline as any other turn.
 ```
 src/            worker.py (LiveKit agent — STT/LLM/TTS orchestration per call, round-robin pool
                 selection via _pick_pool_url),
-                token_server.py (auth + model-picker + static web/ host),
+                token_server.py (auth + model-picker + static Bank/web/ host),
                 orchestrator.py (launches/tears down box 1's backends via Docker Compose),
                 whisper_server.py + whisper_stt.py (shared STT service + its client plugin),
                 chatterbox_server.py + chatterbox_tts.py (shared TTS service + its client plugin —
                 both live here; chatterbox_server.py is a deliberate copy of the one in the
                 sibling Pipeline/ repo, see Architecture),
                 banking.py, db.py, rag.py, convo_log.py, build_index.py, seed_db.py, show_db.py
-web/            Browser frontend (livekit-client) — index.html, vendor/
+Bank/web/       Browser frontend (livekit-client) — index.html, vendor/
 config/         bank_config.json (swappable domain config), models_config.json (backend
                 catalog — id/label/launch params per LLM/STT/TTS option, plus extra_pool_urls for
                 box 2's Whisper/Chatterbox pool members), rag_docs/
@@ -168,64 +168,20 @@ works). Box 1 additionally needs a `.venv` with `requirements.txt` installed (`t
 runs bare-metal there, not in Docker), `data/bank.db` seeded (`python3 src/seed_db.py`), and the
 RAG index built (`python3 src/build_index.py` — `run.sh` also does this automatically if missing).
 
-### From a dev machine with SSH access to both boxes (typical case)
 
-`../start-pipeline.sh` / `../stop-pipeline.sh` (one level up from this repo, alongside the sync
-scripts) drive both boxes over SSH — see their own comments for the exact mechanism. They assume
-`cognimind`/`cognimind2`-style SSH host aliases are already set up and that `../sync-to-PC.sh` /
-`../sync-to-box2.sh` have been run at least once (code deployed, images built).
-
-```bash
-./start-pipeline.sh        # box 1 only: vLLM + 1 Whisper + 1 Chatterbox + the worker
-./start-pipeline.sh -a     # also brings up box 2's pool (3 more Whisper + 3 more Chatterbox)
-./stop-pipeline.sh         # reverse — stop box 1 (graceful SIGINT to run.sh, same as Ctrl+C)
-./stop-pipeline.sh -a      # also stop box 2's pool
-```
-Both are idempotent (safe to re-run; only start/report what isn't already up) and wait for real
-readiness rather than just firing requests and exiting.
 
 ### Directly on box 1 (no dev machine / no SSH in the loop)
 
 ```bash
-cd "Livekit Pipeline" && ./run.sh
+cd "/home/nauyan/Desktop/Voice agents/Livekit Pipeline" && ./run.sh
 ```
 Starts LiveKit + Redis (Docker) and the token server, then open the printed URL — pick your
 LLM/STT/TTS in the browser, confirm, and the pipeline loads. `Ctrl+C` tears everything down,
 including any backend containers `orchestrator.py` started. This is what `start-pipeline.sh` runs
 remotely on your behalf — running it locally at box 1's own terminal is exactly equivalent.
+### Directly on box 2 (no dev machine / no SSH in the loop)
 
-### Setting up from scratch with physical access only (no SSH between the boxes)
-
-If you're sitting at each machine directly rather than working from a dev machine with SSH to
-both — e.g. first-time setup, or SSH access genuinely isn't available — the scripts above don't
-apply, but the underlying steps are simple manual copies:
-
-**On box 1** (the LiveKit server + vLLM + the agent worker + its own Whisper/Chatterbox instance):
-1. Copy this `Livekit Pipeline/` directory onto box 1 (USB drive, local network share, `git
-   clone` — anything that isn't SSH from elsewhere). It's self-contained — no need to also copy
-   the sibling `Pipeline/` repo unless you're separately setting up the original bare-metal
-   assistant there too, which this guide doesn't cover.
-2. Follow the *Prerequisites* above on that machine, then `cd "Livekit Pipeline" && ./run.sh`.
-3. Open `http://localhost:3000` in a browser **on box 1 itself** (or box 1's own LAN/Tailscale
-   address from another device on the same network), pick models, confirm.
-
-**On box 2** (just the Whisper/Chatterbox pool — no LiveKit, no worker, no `config/`/`data/`):
-1. Copy only what's needed to build the two pool images, preserving this exact relative layout —
-   `docker-compose.pool.yml` at the top level, with `Livekit Pipeline/` as a sibling beneath it
-   (mirrors what `../sync-to-box2.sh` pushes over SSH; see that script's own comments for the
-   precise file list — `Dockerfile.whisper` + `Dockerfile.chatterbox` + `requirements.txt` +
-   `requirements-chatterbox.txt` + `src/whisper_server.py` + `src/chatterbox_server.py` +
-   `assets/voice_seed/*.wav`, all under `Livekit Pipeline/`). No `Pipeline/` directory needed on
-   box 2 at all.
-2. Follow the *Prerequisites* above on that machine, then from the directory containing
-   `docker-compose.pool.yml`: `docker compose -f docker-compose.pool.yml up -d`.
-3. **Back on box 1**, edit `config/models_config.json`'s `stt`/`tts` entries — `extra_pool_urls`
-   needs box 2's *actual* LAN IP (defaults are hardcoded to this project's specific box 2; find
-   yours with `ip addr` on box 2 and update both lists to match, keeping the same ports:
-   `8768`-`8770` for Whisper, `8771`-`8773` for Chatterbox). Box 2 itself needs no configuration
-   pointing back at box 1 — the pool services are just plain HTTP servers with no awareness of who
-   calls them.
-4. Restart box 1's pipeline (`./run.sh` again, or just re-confirm the model selection in the
-   browser if it's already running) so the worker picks up the updated pool list.
-
-Run the tests with `pytest tests/ -q`.
+```bash
+cd "/home/nauyan/box2-pool-node" && docker compose -f docker-compose.pool.yml up -d
+```
+Starts the Whisper (STT) and Chatterbox Turbo (TTS) pool with 3 instances each.

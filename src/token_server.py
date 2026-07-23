@@ -3,8 +3,8 @@
 
 Today's WS-based server.py has zero auth on its raw socket — this is the first place real auth
 gets added: the browser must hit this endpoint to get a signed LiveKit access token before it can
-join a room at all. Also serves web/ so the whole frontend + auth flow is one process/origin for
-local dev, matching run.sh's single-`python3 -m http.server` simplicity in the original Pipeline.
+join a room at all. Also serves Bank/web/ so the whole frontend + auth flow is one process/origin
+for local dev, matching run.sh's single-`python3 -m http.server` simplicity in the original Pipeline.
 """
 import os
 import secrets
@@ -39,7 +39,7 @@ LIVEKIT_URL = os.environ.get("LIVEKIT_URL", "ws://localhost:7880")
 LIVEKIT_PUBLIC_URL = os.environ.get("LIVEKIT_PUBLIC_URL", "")
 LIVEKIT_RTC_PORT = int(os.environ.get("LIVEKIT_RTC_PORT", "7880"))
 TOKEN_SERVER_PORT = int(os.environ.get("TOKEN_SERVER_PORT", "3000"))
-WEB_DIR = os.path.join(PROJECT_ROOT, "web")
+WEB_DIR = os.path.join(PROJECT_ROOT, "Bank", "web")
 
 
 def _livekit_url_for(request: Request) -> str:
