@@ -2,523 +2,549 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Voice Agent</title>
 <style>
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    max-width: 720px;
-    margin: 40px auto;
-    background: #0f1115;
-    color: #e6e6e6;
-    padding: 0 16px;
+  :root{
+    --void:#070b18; --deep:#0c1226; --frame:#0a1024; --edge:#1c2a4a;
+    --mist:#8fa3c8; --mist-dim:#5b6f96; --text:#eaf0ff;
+    --orb-b:#17d0e0; --orb-c:#35f0a0; --stop:#e0587a;
+    --pill:rgba(255,255,255,.06); --pill-line:rgba(255,255,255,.12);
+    --panel:rgba(14,20,40,.78); --panel-line:rgba(150,180,255,.16);
   }
-  h1 { font-size: 1.4rem; font-weight: 600; }
-  #history {
-    border: 1px solid #2a2d34;
-    border-radius: 10px;
-    padding: 16px;
-    height: 420px;
-    overflow-y: auto;
-    background: #15181f;
-    margin-bottom: 16px;
+  *{box-sizing:border-box;}
+  html,body{height:100%;}
+  body{
+    margin:0; background:var(--void); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Cantarell",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased; overflow:hidden;
   }
-  .msg { margin-bottom: 12px; line-height: 1.4; }
-  .msg .who { font-weight: 600; }
-  .msg.you .who { color: #6ea8fe; }
-  .msg.agent .who { color: #8ee08e; }
-  #controls {
-    display: flex;
-    align-items: center;
-    gap: 16px;
+  .bg{position:fixed; inset:0; z-index:0; overflow:hidden;}
+  .bg::before{
+    content:""; position:absolute; left:50%; top:46%; width:120vmin; height:120vmin;
+    transform:translate(-50%,-50%);
+    background:radial-gradient(circle at center, rgba(37,87,255,.24), rgba(23,208,224,.08) 34%, transparent 62%);
+    filter:blur(6px);
   }
-  #micBtn {
-    width: 84px;
-    height: 84px;
-    border-radius: 50%;
-    border: none;
-    background: #2a2d34;
-    color: #fff;
-    font-size: 1.6rem;
-    cursor: pointer;
-    user-select: none;
-    transition: background 0.15s, transform 0.1s;
+  .bg::after{
+    content:""; position:absolute; inset:0;
+    background:
+      radial-gradient(120vmin 80vmin at 8% 108%, rgba(37,87,255,.20), transparent 60%),
+      radial-gradient(120vmin 80vmin at 96% 106%, rgba(23,208,224,.14), transparent 60%),
+      linear-gradient(180deg,#050813 0%, #070b18 40%, #060a17 100%);
   }
-  #micBtn.recording { background: #3a7d44; }
-  #micBtn.muted { background: #d9534f; }
-  #status {
-    color: #9aa0a6;
-    font-size: 0.95rem;
+  #stars{position:fixed; inset:0; z-index:0;}
+
+  .stage{position:relative; z-index:1; height:100%; padding:clamp(14px,2.4vmin,28px);}
+  .frame{
+    position:relative; height:100%; border-radius:18px;
+    border:1px solid rgba(150,180,255,.18);
+    background:linear-gradient(180deg, rgba(18,28,54,.45), rgba(8,12,26,.35));
+    box-shadow:0 0 0 1px rgba(0,0,0,.4) inset, 0 30px 80px rgba(0,0,0,.5), 0 -1px 0 rgba(180,205,255,.25) inset;
+    overflow:hidden; display:flex; flex-direction:column;
   }
-  #textForm {
-    display: flex;
-    gap: 8px;
-    margin-top: 12px;
+  .frame::before{
+    content:""; position:absolute; top:0; left:12%; right:12%; height:1px;
+    background:linear-gradient(90deg,transparent,rgba(190,210,255,.7),transparent);
   }
-  #textInput {
-    flex: 1;
-    padding: 10px 14px;
-    border-radius: 8px;
-    border: 1px solid #2a2d34;
-    background: #1b1e25;
-    color: #e6e6e6;
-    font-size: 0.95rem;
+
+  .topbar{display:flex; align-items:center; justify-content:space-between; padding:16px 20px; flex:0 0 auto;}
+  .brand{display:flex; align-items:center; gap:10px;}
+  .brand .dot{width:9px; height:9px; border-radius:50%; background:var(--orb-b); box-shadow:0 0 12px var(--orb-b);}
+  .brand span{font-size:13px; letter-spacing:.14em; text-transform:uppercase; color:var(--mist); font-weight:600;}
+  .gear{width:34px; height:34px; border-radius:50%; display:grid; place-items:center;
+    color:var(--mist); border:1px solid transparent;}
+  .gear svg{width:18px; height:18px;}
+
+  .console{
+    flex:1 1 auto; display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:clamp(12px,2.2vmin,24px); padding:8px 20px 4px; min-height:0;
   }
-  #textInput:focus { outline: 1px solid #6ea8fe; }
-  #sendBtn {
-    padding: 10px 16px;
-    border-radius: 8px;
-    border: 1px solid #2a2d34;
-    background: #1b1e25;
-    color: #e6e6e6;
-    font-size: 0.95rem;
-    cursor: pointer;
+  .orb-wrap{position:relative; width:clamp(200px,36vmin,320px); aspect-ratio:1; flex:0 0 auto;}
+  #orb{width:100%; height:100%; display:block;}
+
+  .status{
+    flex:0 0 auto; text-align:center; max-width:32ch; text-wrap:balance;
+    font-weight:300; letter-spacing:-.01em; line-height:1.34;
+    font-size:clamp(22px,3.3vmin,32px); color:var(--text);
+    height:2.2em; display:flex; align-items:center; justify-content:center; transition:opacity .3s;
   }
-  #sendBtn:hover { background: #22262f; }
-  #startOverlay {
-    text-align: center;
-    padding: 48px 16px;
-    border: 1px solid #2a2d34;
-    border-radius: 10px;
-    background: #15181f;
-    margin-bottom: 16px;
+  .status .accent{color:var(--orb-b);} .status .ok{color:var(--orb-c);} .status .bad{color:var(--stop);}
+
+  .transcript{
+    flex:0 0 auto; width:min(560px,100%); height:clamp(108px,17vh,168px);
+    display:flex; flex-direction:column; justify-content:flex-end; gap:11px; padding:2px 4px; overflow:hidden;
+    -webkit-mask-image:linear-gradient(180deg,transparent,#000 26%);
+    mask-image:linear-gradient(180deg,transparent,#000 26%);
   }
-  #startBtn {
-    padding: 14px 28px;
-    border-radius: 8px;
-    border: none;
-    background: #6ea8fe;
-    color: #0f1115;
-    font-size: 1.05rem;
-    font-weight: 600;
-    cursor: pointer;
+  .line{display:flex; gap:10px; align-items:baseline; opacity:.5; animation:rise .4s ease both; transition:opacity .5s;}
+  .line:last-child{opacity:1;}
+  .line .who{flex:0 0 auto; font-size:11px; letter-spacing:.12em; text-transform:uppercase; font-weight:700; padding-top:2px;}
+  .line.you .who{color:var(--orb-b);}
+  .line.agent .who{color:var(--orb-c);}
+  .line .txt{font-size:15px; line-height:1.5; color:var(--mist);}
+  .line:last-child .txt{color:var(--text);}
+  @keyframes rise{from{opacity:0; transform:translateY(8px);} to{transform:translateY(0);}}
+
+  /* in-call controls */
+  .controls{flex:0 0 auto; display:flex; flex-direction:column; align-items:center; gap:12px; padding:0 20px 24px;}
+  .controls[hidden]{display:none;}
+  #textForm{display:flex; width:min(420px,100%);}
+  #textInput{
+    flex:1; padding:10px 16px; border-radius:22px; border:1px solid var(--pill-line);
+    background:rgba(255,255,255,.05); color:var(--text); font-size:14px; outline:none;
   }
-  #startBtn:hover { background: #8bb9ff; }
-  #startBtn:disabled { background: #3a3f4a; cursor: default; }
-  #startHint {
-    margin-top: 12px;
-    color: #9aa0a6;
-    font-size: 0.9rem;
+  #textInput::placeholder{color:var(--mist-dim);}
+  #textInput:focus{border-color:var(--orb-b);}
+  .pill{display:flex; align-items:center; gap:8px; padding:8px;
+    background:var(--pill); border:1px solid var(--pill-line); border-radius:44px; backdrop-filter:blur(8px);}
+  .cbtn{width:56px; height:56px; border-radius:50%; border:none; cursor:pointer; display:grid; place-items:center;
+    color:var(--text); background:rgba(255,255,255,.07); transition:.18s; position:relative;}
+  .cbtn:hover{background:rgba(255,255,255,.14);}
+  .cbtn:focus-visible{outline:2px solid var(--orb-b); outline-offset:3px;}
+  .cbtn:disabled{opacity:.5; cursor:default;}
+  .cbtn svg{width:22px; height:22px;}
+  .cbtn.end:hover{background:rgba(224,88,122,.22); color:#ffd3dd;}
+  .cbtn.mic.live{background:linear-gradient(180deg,#2557ff,#1b3fb8); box-shadow:0 0 18px rgba(37,87,255,.5);}
+  .cbtn.mic.muted{background:rgba(224,88,122,.16); color:#ffb9c6;}
+  .cbtn.mic.live::after{content:""; position:absolute; inset:-6px; border-radius:50%;
+    border:1.5px solid rgba(37,87,255,.4); animation:ping 1.8s ease-out infinite;}
+  @keyframes ping{0%{transform:scale(.9); opacity:.7;} 100%{transform:scale(1.3); opacity:0;}}
+
+  /* setup overlay (model picker / loading / start) */
+  .overlay{
+    position:absolute; inset:0; z-index:5; display:flex; align-items:center; justify-content:center;
+    padding:24px; background:rgba(6,10,22,.55); backdrop-filter:blur(3px);
   }
-  #startError {
-    margin-top: 12px;
-    color: #ff8080;
-    font-size: 0.9rem;
-    display: none;
+  .overlay[hidden]{display:none;}
+  .panel{
+    width:min(440px,100%); max-height:100%; overflow:auto;
+    background:var(--panel); border:1px solid var(--panel-line); border-radius:16px;
+    padding:24px; box-shadow:0 24px 60px rgba(0,0,0,.5);
   }
-  #modelSelectOverlay {
-    padding: 24px;
-    border: 1px solid #2a2d34;
-    border-radius: 10px;
-    background: #15181f;
-    margin-bottom: 16px;
-  }
-  #modelSelectOverlay h2 { font-size: 1.1rem; font-weight: 600; margin: 0 0 16px; }
-  #modelPicker fieldset {
-    border: 1px solid #2a2d34;
-    border-radius: 8px;
-    margin-bottom: 12px;
-    padding: 10px 14px;
-  }
-  #modelPicker legend {
-    padding: 0 6px;
-    color: #9aa0a6;
-    font-size: 0.85rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-  #modelPicker label {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 0;
-    font-size: 0.95rem;
-    cursor: pointer;
-  }
-  #confirmBtn {
-    margin-top: 8px;
-    padding: 12px 24px;
-    border-radius: 8px;
-    border: none;
-    background: #6ea8fe;
-    color: #0f1115;
-    font-size: 1rem;
-    font-weight: 600;
-    cursor: pointer;
-  }
-  #confirmBtn:hover { background: #8bb9ff; }
-  #confirmBtn:disabled { background: #3a3f4a; cursor: default; }
-  .progressRow {
-    padding: 8px 0;
-    font-size: 0.95rem;
-    color: #e6e6e6;
-    border-bottom: 1px solid #2a2d34;
-  }
-  .progressRow:last-child { border-bottom: none; }
-  .progressStatus { color: #9aa0a6; }
-  .progressStatus.loading { color: #6ea8fe; }
-  .progressStatus.ready { color: #8ee08e; }
-  .progressStatus.error { color: #ff8080; }
-  #modelSelectError {
-    margin-top: 12px;
-    color: #ff8080;
-    font-size: 0.9rem;
-    display: none;
-  }
+  .panel-title{font-size:18px; font-weight:600; margin:0 0 4px; letter-spacing:-.01em;}
+  .panel-sub{font-size:13px; color:var(--mist); margin:0 0 18px;}
+  fieldset{border:1px solid var(--edge); border-radius:10px; margin:0 0 12px; padding:8px 14px 10px;}
+  legend{padding:0 6px; color:var(--mist); font-size:11px; letter-spacing:.1em; text-transform:uppercase;}
+  .opt{display:flex; align-items:center; gap:10px; padding:7px 0; font-size:14px; cursor:pointer;}
+  .opt input{accent-color:var(--orb-b); width:16px; height:16px;}
+  .btn{width:100%; margin-top:6px; padding:12px 18px; border-radius:10px; border:none; cursor:pointer;
+    font-size:15px; font-weight:600; transition:.16s;}
+  .btn.primary{background:linear-gradient(180deg,#2b6bff,#1b3fb8); color:#fff; box-shadow:0 6px 18px rgba(37,87,255,.35);}
+  .btn.primary:hover{filter:brightness(1.08);}
+  .btn.primary:disabled{background:#2a3350; color:#8b93ab; box-shadow:none; cursor:default;}
+  .prow{display:flex; justify-content:space-between; align-items:center; padding:10px 2px; font-size:14px;
+    border-bottom:1px solid var(--edge);}
+  .prow:last-child{border-bottom:none;}
+  .pstat{font-size:12px; letter-spacing:.06em; text-transform:uppercase; color:var(--mist-dim);}
+  .pstat.loading{color:var(--orb-b);} .pstat.ready{color:var(--orb-c);} .pstat.error{color:var(--stop);}
+  .hint{font-size:13px; color:var(--mist); margin:0 0 16px; line-height:1.5;}
+  .err{margin-top:14px; padding:10px 12px; border-radius:8px; font-size:13px; line-height:1.45;
+    background:rgba(224,88,122,.12); border:1px solid rgba(224,88,122,.3); color:#ffc2cd;}
+  .err[hidden]{display:none;}
+  [hidden]{display:none !important;}
+
+  @media (prefers-reduced-motion:reduce){ .cbtn.mic.live::after{animation:none;} .line{animation:none;} }
+  @media (max-width:520px){ .brand span{display:none;} }
 </style>
 </head>
 <body>
-  <h1>Voice Agent</h1>
-  <div id="history"></div>
-  <div id="modelSelectOverlay">
-    <h2>Choose your pipeline</h2>
-    <div id="modelPicker">
-      <fieldset id="llmChoices"><legend>LLM</legend></fieldset>
-      <fieldset id="sttChoices"><legend>Speech-to-text</legend></fieldset>
-      <fieldset id="ttsChoices"><legend>Text-to-speech</legend></fieldset>
-      <button id="confirmBtn">Confirm &amp; Load Models</button>
+<div class="bg"></div>
+<canvas id="stars"></canvas>
+
+<div class="stage">
+  <div class="frame">
+    <div class="topbar">
+      <div class="brand"><div class="dot"></div><span>Voice Agent</span></div>
+      <div class="gear" title="Settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+      </div>
     </div>
-    <div id="loadProgress" style="display:none">
-      <div class="progressRow" data-cat="llm">LLM: <span class="progressStatus">pending</span></div>
-      <div class="progressRow" data-cat="stt">STT: <span class="progressStatus">pending</span></div>
-      <div class="progressRow" data-cat="tts">TTS: <span class="progressStatus">pending</span></div>
+
+    <div class="console">
+      <div class="orb-wrap"><canvas id="orb"></canvas></div>
+      <div class="status" id="status">Ready</div>
+      <div class="transcript" id="transcript"></div>
     </div>
-    <div id="modelSelectError"></div>
+
+    <div class="controls" id="controls" hidden>
+      <form id="textForm" autocomplete="off"><input id="textInput" type="text" placeholder="Type instead of speaking…"></form>
+      <div class="pill">
+        <button class="cbtn end" id="endBtn" title="End call" aria-label="End call">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+        <button class="cbtn mic live" id="micBtn" title="Mute microphone" aria-label="Microphone">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- setup overlay: model picker -> loading -> start; hidden once a call is live -->
+    <div class="overlay" id="setup">
+      <div class="panel">
+        <h2 class="panel-title" id="setupTitle">Choose your pipeline</h2>
+        <p class="panel-sub" id="setupSub">Pick the models to load. Nothing starts on the GPUs until you confirm.</p>
+
+        <div id="modelPicker">
+          <fieldset id="llmChoices"><legend>Language model</legend></fieldset>
+          <fieldset id="sttChoices"><legend>Speech-to-text</legend></fieldset>
+          <fieldset id="ttsChoices"><legend>Text-to-speech</legend></fieldset>
+          <button class="btn primary" id="confirmBtn">Confirm &amp; load models</button>
+        </div>
+
+        <div id="loadProgress" hidden>
+          <div class="prow" data-cat="llm"><span>Language model</span><span class="pstat">pending</span></div>
+          <div class="prow" data-cat="stt"><span>Speech-to-text</span><span class="pstat">pending</span></div>
+          <div class="prow" data-cat="tts"><span>Text-to-speech</span><span class="pstat">pending</span></div>
+        </div>
+
+        <div id="startPanel" hidden>
+          <p class="hint">Pipeline ready. Start a call and speak — your browser will ask for microphone access.</p>
+          <button class="btn primary" id="startBtn">Start call</button>
+        </div>
+
+        <div class="err" id="setupError" hidden></div>
+      </div>
+    </div>
   </div>
-  <div id="startOverlay" style="display:none">
-    <button id="startBtn">▶ Start Call</button>
-    <div id="startHint">Joins a LiveKit room and connects you with the agent — your browser
-      will ask for microphone permission.</div>
-    <div id="startError"></div>
-  </div>
-  <div id="controls" style="display:none">
-    <button id="micBtn">🎙</button>
-    <div id="status">Connecting…</div>
-  </div>
-  <form id="textForm" autocomplete="off" style="display:none">
-    <input id="textInput" type="text" placeholder="Or type a message instead of speaking…">
-    <button id="sendBtn" type="submit">Send</button>
-  </form>
+</div>
 
 <script type="module">
 import { Room, RoomEvent, Track } from "./vendor/livekit-client.esm.mjs";
+const reduce = window.matchMedia("(prefers-reduced-motion:reduce)").matches;
 
-const historyEl = document.getElementById("history");
-const micBtn = document.getElementById("micBtn");
-const statusEl = document.getElementById("status");
-const startOverlay = document.getElementById("startOverlay");
-const startBtn = document.getElementById("startBtn");
-const startErrorEl = document.getElementById("startError");
-const controlsEl = document.getElementById("controls");
-const textFormEl = document.getElementById("textForm");
-const textInput = document.getElementById("textInput");
+/* ===== ambient starfield ===== */
+(function stars(){
+  const c=document.getElementById("stars"), x=c.getContext("2d");
+  let w,h,dots=[];
+  function size(){
+    const d=Math.min(devicePixelRatio||1,2);
+    w=c.width=innerWidth*d; h=c.height=innerHeight*d; c.style.width=innerWidth+"px"; c.style.height=innerHeight+"px";
+    dots=Array.from({length:Math.round(innerWidth*innerHeight/14000)},()=>({
+      x:Math.random()*w, y:Math.random()*h, r:(Math.random()*1.1+.2)*d, a:Math.random()*.5+.1, tw:Math.random()*6.28
+    }));
+  }
+  size(); addEventListener("resize", size);
+  (function loop(t){
+    x.clearRect(0,0,w,h);
+    for(const p of dots){ const tw=reduce?p.a:p.a*(0.6+0.4*Math.sin(p.tw+t*0.001));
+      x.beginPath(); x.arc(p.x,p.y,p.r,0,7); x.fillStyle="rgba(180,205,255,"+tw+")"; x.fill(); }
+    requestAnimationFrame(loop);
+  })(0);
+})();
 
-const modelSelectOverlay = document.getElementById("modelSelectOverlay");
-const modelPicker = document.getElementById("modelPicker");
-const loadProgress = document.getElementById("loadProgress");
-const modelSelectError = document.getElementById("modelSelectError");
-const confirmBtn = document.getElementById("confirmBtn");
-
-let room = null;
-let micEnabled = false;
-
-function setStatus(text) { statusEl.textContent = text; }
-
-// #status lives inside #controls, which is still hidden before a successful connect — an error
-// during startCall() would otherwise be set but literally invisible. Mirror it here too.
-function showStartError(text) {
-  setStatus(text);
-  startErrorEl.textContent = text;
-  startErrorEl.style.display = "block";
+/* ===== audio-reactive level (real mic + agent audio) ===== */
+let audioCtx=null;
+const analysers=new Map();  // key -> {an, data, src}
+function ensureCtx(){ if(!audioCtx) audioCtx=new (window.AudioContext||window.webkitAudioContext)(); return audioCtx; }
+function attachAnalyser(key, mst){
+  if(!mst || analysers.has(key)) return;
+  try{
+    const ctx=ensureCtx();
+    const src=ctx.createMediaStreamSource(new MediaStream([mst]));
+    const an=ctx.createAnalyser(); an.fftSize=512; an.smoothingTimeConstant=0.55;
+    src.connect(an);
+    analysers.set(key,{an, data:new Uint8Array(an.frequencyBinCount), src});
+  }catch(e){ console.warn("analyser attach failed:", e); }
+}
+function detachAnalyser(key){ const a=analysers.get(key); if(a){ try{a.src.disconnect();}catch(e){} analysers.delete(key);} }
+function readAudio(){
+  let level=0, pitch=0.5;
+  for(const {an,data} of analysers.values()){
+    an.getByteTimeDomainData(data);
+    let sum=0; for(let i=0;i<data.length;i++){ const v=(data[i]-128)/128; sum+=v*v; }
+    level=Math.max(level, Math.sqrt(sum/data.length));
+    an.getByteFrequencyData(data);
+    let num=0,den=0; for(let i=0;i<data.length;i++){ num+=i*data[i]; den+=data[i]; }
+    if(den>0) pitch=(num/den)/data.length;
+  }
+  return {level, pitch};
 }
 
-if (!window.isSecureContext) {
-  showStartError(
-    "This page isn't loaded over a secure origin (HTTPS, or localhost) — your browser will " +
-    "block microphone access. You'll still be able to connect and type, but not speak."
-  );
+/* ===== WebGL fluid sphere ===== */
+const orb=document.getElementById("orb");
+const gl=orb.getContext("webgl",{alpha:true,premultipliedAlpha:false,antialias:true});
+const VERT=`attribute vec2 aPos; varying vec2 vUv; void main(){ vUv=aPos*0.5+0.5; gl_Position=vec4(aPos,0.0,1.0); }`;
+const FRAG=`
+precision highp float;
+varying vec2 vUv;
+uniform vec2 uRes; uniform float uFlow; uniform float uSpin; uniform float uAmp;
+float hash(vec3 p){ p=fract(p*0.3183099+0.1); p*=17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }
+float noise(vec3 x){ vec3 i=floor(x), f=fract(x); f=f*f*(3.0-2.0*f);
+  return mix(mix(mix(hash(i+vec3(0,0,0)),hash(i+vec3(1,0,0)),f.x), mix(hash(i+vec3(0,1,0)),hash(i+vec3(1,1,0)),f.x),f.y),
+             mix(mix(hash(i+vec3(0,0,1)),hash(i+vec3(1,0,1)),f.x), mix(hash(i+vec3(0,1,1)),hash(i+vec3(1,1,1)),f.x),f.y),f.z); }
+float fbm(vec3 p){ float a=0.5,s=0.0; for(int i=0;i<4;i++){ s+=a*noise(p); p*=2.03; a*=0.5;} return s; }
+mat3 rotY(float a){ float c=cos(a),s=sin(a); return mat3(c,0.0,s, 0.0,1.0,0.0, -s,0.0,c); }
+mat3 rotX(float a){ float c=cos(a),s=sin(a); return mat3(1.0,0.0,0.0, 0.0,c,-s, 0.0,s,c); }
+void main(){
+  vec2 p=(vUv*2.0-1.0); p.x*=uRes.x/uRes.y; p*=1.25/(1.0+uAmp*0.14);
+  float r=length(p);
+  if(r>1.0){ float g=smoothstep(1.7,1.0,r); gl_FragColor=vec4(vec3(0.13,0.33,1.0),(0.35+uAmp*0.45)*g*0.6); return; }
+  float z=sqrt(max(0.0,1.0-r*r)); vec3 N=vec3(p,z);
+  vec3 sp=rotX(0.32)*rotY(uSpin)*N;
+  float tt=uFlow; float warp=0.5+uAmp*1.2;
+  float w1=fbm(sp*1.7+vec3(0.0,0.0,tt)); float w2=fbm(sp*1.7+vec3(3.1,1.7,tt*0.9));
+  vec3 sq=sp*2.1+vec3(w1,w2,0.0)*warp;
+  float n=fbm(sq+vec3(0.0,0.0,tt*0.6)); float n2=fbm(sq*1.8+vec3(tt*0.5,0.0,0.0));
+  vec3 c1=vec3(0.24,0.48,1.0), c2=vec3(0.10,0.86,0.92), c3=vec3(0.24,0.96,0.58),
+       c4=vec3(0.62,0.34,1.0), c5=vec3(1.0,0.34,0.78), c6=vec3(1.0,0.40,0.42), c7=vec3(1.0,0.66,0.26);
+  vec3 col=c1;
+  col=mix(col,c2,smoothstep(0.12,0.48,n));
+  col=mix(col,c3,smoothstep(0.40,0.70,n));
+  col=mix(col,c4,smoothstep(0.50,0.82,n2));
+  col=mix(col,c5,smoothstep(0.48,0.82,w1));
+  col=mix(col,c6,smoothstep(0.52,0.82,w2*n*1.7));
+  col=mix(col,c7,smoothstep(0.58,0.88,w1*n2*1.7));
+  col*=0.80+0.42*n;
+  vec3 L=normalize(vec3(-0.45,0.55,0.75));
+  float diff=clamp(dot(N,L),0.0,1.0); col*=0.58+0.62*diff;
+  vec3 H=normalize(L+vec3(0.0,0.0,1.0)); float spec=pow(clamp(dot(N,H),0.0,1.0),42.0); col+=spec*(0.5+0.35*uAmp);
+  float fres=pow(1.0-z,2.6); col+=fres*vec3(0.25,0.5,1.0)*0.55; col*=mix(1.0,0.82,r);
+  gl_FragColor=vec4(col, smoothstep(1.0,0.965,r));
+}`;
+function compile(t,s){ const sh=gl.createShader(t); gl.shaderSource(sh,s); gl.compileShader(sh);
+  if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS)) console.warn(gl.getShaderInfoLog(sh)); return sh; }
+let uRes,uFlow,uSpin,uAmp;
+if(gl){
+  const prog=gl.createProgram();
+  gl.attachShader(prog,compile(gl.VERTEX_SHADER,VERT)); gl.attachShader(prog,compile(gl.FRAGMENT_SHADER,FRAG));
+  gl.linkProgram(prog); gl.useProgram(prog);
+  const buf=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+  const loc=gl.getAttribLocation(prog,"aPos"); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
+  uRes=gl.getUniformLocation(prog,"uRes"); uFlow=gl.getUniformLocation(prog,"uFlow");
+  uSpin=gl.getUniformLocation(prog,"uSpin"); uAmp=gl.getUniformLocation(prog,"uAmp");
+  gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA); gl.clearColor(0,0,0,0);
+}
+function sizeOrb(){ const dpr=Math.min(devicePixelRatio||1,2), b=orb.getBoundingClientRect();
+  orb.width=Math.round(b.width*dpr); orb.height=Math.round(b.height*dpr); if(gl) gl.viewport(0,0,orb.width,orb.height); }
+new ResizeObserver(sizeOrb).observe(orb); sizeOrb();
+
+let amp=0.06, flow=0, spin=0, pitch=0.5, prevT=0, agentState="idle", inCall=false;
+function synth(t){ return 0.5+0.5*Math.sin(t*6.5)*(0.6+0.4*Math.sin(t*2.1)); }
+function frame(now){
+  const ts=now*0.001, dt=Math.min(0.05, prevT?ts-prevT:0); prevT=ts;
+  const a=readAudio();
+  let target=a.level*3.4;                          // real audio drives it
+  if(inCall){                                       // fallbacks so the orb always reflects state
+    if(agentState==="speaking") target=Math.max(target,0.34+0.24*synth(ts));
+    else if(agentState==="listening") target=Math.max(target,0.12);
+    else if(agentState==="thinking") target=Math.max(target*0.5,0.10);
+  }
+  target=Math.min(1,target);
+  amp += (target-amp)*0.20;
+  pitch += (a.pitch-pitch)*0.10;
+  if(!reduce){ flow += dt*(0.11+amp*0.72+pitch*amp*0.35); spin += dt*(0.03+amp*0.22); }
+  if(gl){
+    gl.uniform2f(uRes,orb.width,orb.height);
+    gl.uniform1f(uFlow, reduce?4.0:flow); gl.uniform1f(uSpin, reduce?0.6:spin); gl.uniform1f(uAmp, reduce?0.12:amp);
+    gl.clear(gl.COLOR_BUFFER_BIT); gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* ===== DOM refs ===== */
+const statusEl=document.getElementById("status");
+const transcriptEl=document.getElementById("transcript");
+const controlsEl=document.getElementById("controls");
+const micBtn=document.getElementById("micBtn");
+const endBtn=document.getElementById("endBtn");
+const textForm=document.getElementById("textForm");
+const textInput=document.getElementById("textInput");
+const setup=document.getElementById("setup");
+const setupTitle=document.getElementById("setupTitle");
+const setupSub=document.getElementById("setupSub");
+const modelPicker=document.getElementById("modelPicker");
+const loadProgress=document.getElementById("loadProgress");
+const startPanel=document.getElementById("startPanel");
+const setupError=document.getElementById("setupError");
+const confirmBtn=document.getElementById("confirmBtn");
+const startBtn=document.getElementById("startBtn");
+
+const setStatus=h=>{ statusEl.innerHTML=h; };
+function showSetupError(t){ setupError.textContent=t; setupError.hidden=false; }
+function clearSetupError(){ setupError.hidden=true; }
+
+let room=null, micEnabled=false;
+
+/* ===== transcript ===== */
+function addLine(who, text){
+  const div=document.createElement("div");
+  div.className="line "+(who==="You"?"you":"agent");
+  div.innerHTML='<span class="who"></span><span class="txt"></span>';
+  div.querySelector(".who").textContent=who;
+  const txt=div.querySelector(".txt"); txt.textContent=text;
+  transcriptEl.appendChild(div);
+  while(transcriptEl.children.length>8) transcriptEl.removeChild(transcriptEl.firstChild);
+  return txt;
 }
 
-function appendMessage(who, text) {
-  const div = document.createElement("div");
-  div.className = "msg " + (who === "You" ? "you" : "agent");
-  div.innerHTML = `<span class="who">${who}:</span> <span class="text"></span>`;
-  div.querySelector(".text").textContent = text;
-  historyEl.appendChild(div);
-  historyEl.scrollTop = historyEl.scrollHeight;
-  return div;
+/* ===== agent state -> status (short labels only) ===== */
+const AGENT_STATE_LABELS={ initializing:"Connecting", idle:"Ready", listening:"Listening", thinking:"Thinking", speaking:"Speaking" };
+function applyAgentState(participant){
+  const state=participant.attributes && participant.attributes["lk.agent.state"];
+  if(participant.isAgent && state){ agentState=state; setStatus(AGENT_STATE_LABELS[state]||state); }
 }
 
-// Agent state ("listening" | "thinking" | "speaking" | "idle" | "initializing") is published
-// automatically by AgentSession as the agent participant's `lk.agent.state` attribute — this
-// drives the status line instead of any bespoke protocol message.
-const AGENT_STATE_LABELS = {
-  initializing: "Connecting…",
-  idle: "Ready",
-  listening: "Listening…",
-  thinking: "Thinking…",
-  speaking: "Agent speaking…",
-};
-
-function applyAgentState(participant) {
-  const state = participant.attributes && participant.attributes["lk.agent.state"];
-  if (participant.isAgent && state) setStatus(AGENT_STATE_LABELS[state] || state);
-}
-
-async function startCall() {
-  startBtn.disabled = true;
-  setStatus("Connecting…");
-
-  let token, url;
-  try {
+/* ===== start / run a call ===== */
+async function startCall(){
+  startBtn.disabled=true; clearSetupError(); setStatus("Connecting");
+  let token,url;
+  try{
     let resp;
-    try {
-      resp = await fetch("/api/token", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: "{}",
-      });
-    } catch (networkErr) {
-      throw new Error("Couldn't reach the token server: " + networkErr.message);
-    }
-    if (!resp.ok) {
-      // 503 = at the concurrent-call cap (see token_server.py's _active_call_count check) — its
-      // message ("Line is full...") is already user-facing, show it as-is, no extra framing.
-      const body = await resp.json().catch(() => ({}));
-      throw new Error(body.detail || `token request failed: ${resp.status}`);
-    }
-    ({ token, url } = await resp.json());
-  } catch (err) {
-    console.error("Failed to get access token:", err);
-    showStartError(err.message);
-    startBtn.disabled = false;
-    return;
-  }
+    try{ resp=await fetch("/api/token",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"}); }
+    catch(e){ throw new Error("Couldn't reach the token server: "+e.message); }
+    if(!resp.ok){ const b=await resp.json().catch(()=>({})); throw new Error(b.detail||`token request failed: ${resp.status}`); }
+    ({token,url}=await resp.json());
+  }catch(err){ console.error(err); showSetupError(err.message); startBtn.disabled=false; return; }
 
-  room = new Room({ adaptiveStream: true, dynacast: true });
+  room=new Room({adaptiveStream:true, dynacast:true});
 
-  // Both the caller's own live STT transcript and the agent's spoken transcript arrive on this
-  // one topic (AgentSession's RoomIO convention), distinguished by sender identity. Each call to
-  // the handler corresponds to one growing utterance/segment — chunks are incremental text to
-  // append, not the full text resent each time.
-  //
-  // Known livekit-agents quirk (confirmed against the SDK source, not a bug in this app): the
-  // caller's own transcript output is built with is_delta_stream=False, and for every final STT
-  // result RoomIO calls capture_text(full_text) *then* flush() — each of which independently
-  // publishes a complete text stream with the same content, so the same utterance arrives twice.
-  // Both copies share the same lk.segment_id attribute, so dedupe on that.
-  const seenTranscriptSegments = new Set();
-  room.registerTextStreamHandler("lk.transcription", async (reader, participantInfo) => {
-    const segmentId = reader.info.attributes && reader.info.attributes["lk.segment_id"];
-    if (segmentId) {
-      if (seenTranscriptSegments.has(segmentId)) return;
-      seenTranscriptSegments.add(segmentId);
-    }
-    const isYou = participantInfo.identity === room.localParticipant.identity;
-    const bubble = appendMessage(isYou ? "You" : "Agent", "");
-    for await (const chunk of reader) {
-      bubble.querySelector(".text").textContent += chunk;
-      historyEl.scrollTop = historyEl.scrollHeight;
-    }
+  // Live transcripts (caller STT + agent speech) arrive on lk.transcription, one growing segment
+  // per handler call. livekit-agents publishes each final caller utterance twice with the same
+  // lk.segment_id — dedupe on that.
+  const seen=new Set();
+  room.registerTextStreamHandler("lk.transcription", async (reader, info)=>{
+    const sid=reader.info.attributes && reader.info.attributes["lk.segment_id"];
+    if(sid){ if(seen.has(sid)) return; seen.add(sid); }
+    const isYou=info.identity===room.localParticipant.identity;
+    const txt=addLine(isYou?"You":"Agent","");
+    for await(const chunk of reader){ txt.textContent+=chunk; }
   });
 
-  room.on(RoomEvent.TrackSubscribed, (track) => {
-    if (track.kind === Track.Kind.Audio) {
-      const el = track.attach();
-      el.style.display = "none";
-      document.body.appendChild(el);
+  room.on(RoomEvent.TrackSubscribed,(track)=>{
+    if(track.kind===Track.Kind.Audio){
+      const el=track.attach(); el.style.display="none"; document.body.appendChild(el); // playback
+      attachAnalyser("agent:"+track.sid, track.mediaStreamTrack);                       // reactivity
     }
   });
+  room.on(RoomEvent.TrackUnsubscribed,(track)=>{ if(track.kind===Track.Kind.Audio){ track.detach().forEach(e=>e.remove()); detachAnalyser("agent:"+track.sid); } });
+  room.on(RoomEvent.LocalTrackPublished,(pub)=>{ if(pub.kind===Track.Kind.Audio && pub.track) attachAnalyser("mic", pub.track.mediaStreamTrack); });
+  room.on(RoomEvent.ParticipantAttributesChanged,(_c,p)=>applyAgentState(p));
+  room.on(RoomEvent.ParticipantConnected,(p)=>applyAgentState(p));
+  room.on(RoomEvent.Disconnected,()=>endCall(true));
 
-  room.on(RoomEvent.ParticipantAttributesChanged, (_changed, participant) => applyAgentState(participant));
-  room.on(RoomEvent.ParticipantConnected, (participant) => applyAgentState(participant));
-  room.on(RoomEvent.Disconnected, () => {
-    setStatus("Disconnected");
-    micBtn.classList.remove("recording", "muted");
-  });
+  try{ await room.connect(url,token); ensureCtx().resume&&ensureCtx().resume(); for(const p of room.remoteParticipants.values()) applyAgentState(p); }
+  catch(err){ console.error(err); showSetupError("Connection error: "+err.message); startBtn.disabled=false; return; }
 
-  try {
-    await room.connect(url, token);
-    for (const p of room.remoteParticipants.values()) applyAgentState(p);
-  } catch (err) {
-    console.error("Failed to connect to the room:", err);
-    showStartError("Connection error: " + err.message);
-    startBtn.disabled = false;
-    return;
-  }
+  // Mic is best-effort: fails on an insecure origin, but the room + typed text still work.
+  try{ await room.localParticipant.setMicrophoneEnabled(true); micEnabled=true; micBtn.classList.add("live"); micBtn.classList.remove("muted"); }
+  catch(err){ console.error(err); micEnabled=false; micBtn.classList.remove("live"); micBtn.classList.add("muted"); micBtn.disabled=true; micBtn.title="Microphone unavailable: "+err.message; }
 
-  // Mic access is best-effort, not a precondition for the rest of the UI: it routinely fails on
-  // an insecure origin (see the isSecureContext check above) even though the room connection
-  // itself — and so typed text — works fine. Don't strand the user on the start screen for it.
-  try {
-    await room.localParticipant.setMicrophoneEnabled(true);
-    micEnabled = true;
-    micBtn.classList.add("recording");
-  } catch (err) {
-    console.error("Failed to enable microphone:", err);
-    micEnabled = false;
-    micBtn.classList.add("muted");
-    micBtn.disabled = true;
-    micBtn.title = "Microphone unavailable: " + err.message;
-  }
-
-  startOverlay.style.display = "none";
-  controlsEl.style.display = "flex";
-  textFormEl.style.display = "flex";
-  setStatus(micEnabled ? "Listening…" : "Mic unavailable — you can still type");
+  inCall=true;
+  setup.hidden=true;
+  controlsEl.hidden=false;
+  setStatus(micEnabled?"Listening":"Mic unavailable — you can type");
 }
 
-startBtn.addEventListener("click", startCall);
+function endCall(fromEvent){
+  inCall=false; agentState="idle";
+  if(room && !fromEvent){ try{ room.disconnect(); }catch(e){} }
+  for(const k of [...analysers.keys()]) detachAnalyser(k);
+  document.querySelectorAll("body > audio").forEach(e=>e.remove());
+  room=null; micEnabled=false;
+  controlsEl.hidden=true;
+  micBtn.disabled=false; micBtn.classList.remove("muted"); micBtn.classList.add("live");
+  setStatus("Ready");
+  // back to the ready-to-call panel
+  modelPicker.hidden=true; loadProgress.hidden=true; startPanel.hidden=false;
+  setupTitle.textContent="Call ended"; setupSub.textContent="Start another call whenever you're ready.";
+  startBtn.disabled=false; setup.hidden=false;
+}
 
-// Real-time listening is continuous once connected (Silero VAD + barge-in run server-side,
-// same as before) — this button is a mute toggle, not a start/stop-listening switch.
-micBtn.addEventListener("click", async () => {
-  if (!room) return;
-  micEnabled = !micEnabled;
-  await room.localParticipant.setMicrophoneEnabled(micEnabled);
-  micBtn.classList.toggle("recording", micEnabled);
-  micBtn.classList.toggle("muted", !micEnabled);
-  setStatus(micEnabled ? "Listening…" : "Muted");
+/* ===== controls ===== */
+micBtn.addEventListener("click", async ()=>{
+  if(!room) return;
+  micEnabled=!micEnabled;
+  try{ await room.localParticipant.setMicrophoneEnabled(micEnabled); }catch(e){ console.error(e); }
+  micBtn.classList.toggle("live",micEnabled); micBtn.classList.toggle("muted",!micEnabled);
+  if(!inCall) return;
+  if(!micEnabled) setStatus("Muted"); else if(agentState) setStatus(AGENT_STATE_LABELS[agentState]||"Listening");
 });
+endBtn.addEventListener("click", ()=>endCall(false));
 
-// Typed text skips STT entirely — the agent takes the text as-is and runs the same
-// LLM (+ tool-calling) + TTS pipeline as a spoken turn (AgentSession's `lk.chat` text-input topic).
-// Unlike speech, nothing ever echoes typed text back on `lk.transcription` (there's no STT pass
-// to republish) — render the "You" bubble locally instead of waiting for a round-trip that
-// will never arrive.
-textFormEl.addEventListener("submit", async (e) => {
+// Typed text skips STT; the agent runs the same LLM+TTS turn. Nothing echoes it back on
+// lk.transcription (no STT pass), so render the "You" line locally.
+textForm.addEventListener("submit", async (e)=>{
   e.preventDefault();
-  const text = textInput.value.trim();
-  if (!text || !room) return;
-  textInput.value = "";
-  appendMessage("You", text);
-  try {
-    await room.localParticipant.sendText(text, { topic: "lk.chat" });
-  } catch (err) {
-    console.error("Failed to send text:", err);
-    setStatus("Failed to send: " + err.message);
-  }
+  const text=textInput.value.trim(); if(!text||!room) return;
+  textInput.value=""; addLine("You",text);
+  try{ await room.localParticipant.sendText(text,{topic:"lk.chat"}); }
+  catch(err){ console.error(err); setStatus("Failed to send"); }
 });
 
-// ── Model selection (gates everything above): the pipeline loads nothing on the backend until
-// a choice is confirmed here. Shown first; #startOverlay stays hidden until orchestration
-// (src/orchestrator.py, via token_server.py's /api/selection endpoints) reports every backend
-// ready. Selection is per pipeline-run, not per-call — once confirmed it can't be changed
-// without restarting the whole pipeline (Ctrl+C run.sh and rerun).
-const CATEGORY_LABELS = { llm: "LLM", stt: "STT", tts: "TTS" };
-
-function showModelSelectError(text) {
-  modelSelectError.textContent = text;
-  modelSelectError.style.display = "block";
-}
-
-function renderChoices(fieldset, category, entries) {
-  for (const entry of entries) {
-    const label = document.createElement("label");
-    const input = document.createElement("input");
-    input.type = "radio";
-    input.name = category;
-    input.value = entry.id;
-    if (entries.length === 1) input.checked = true;   // only one option today — pre-select it
-    label.appendChild(input);
-    label.appendChild(document.createTextNode(entry.label));
+/* ===== model selection (gates the call) ===== */
+const CATEGORY_LABELS={llm:"Language model", stt:"Speech-to-text", tts:"Text-to-speech"};
+function renderChoices(fieldset, category, entries){
+  for(const entry of entries){
+    const label=document.createElement("label"); label.className="opt";
+    const input=document.createElement("input"); input.type="radio"; input.name=category; input.value=entry.id;
+    if(entries.length===1) input.checked=true;
+    label.appendChild(input); label.appendChild(document.createTextNode(entry.label));
     fieldset.appendChild(label);
   }
 }
-
-function showProgress(status) {
-  for (const [category, state] of Object.entries(status.backends || {})) {
-    const row = loadProgress.querySelector(`.progressRow[data-cat="${category}"] .progressStatus`);
-    if (row) {
-      row.textContent = state.status;
-      row.className = "progressStatus " + state.status;
-    }
+function showProgress(status){
+  for(const [category,state] of Object.entries(status.backends||{})){
+    const el=loadProgress.querySelector(`.prow[data-cat="${category}"] .pstat`);
+    if(el){ el.textContent=state.status; el.className="pstat "+state.status; }
   }
 }
-
-function revealStartOverlay() {
-  modelSelectOverlay.style.display = "none";
-  startOverlay.style.display = "block";
+function revealStart(){
+  modelPicker.hidden=true; loadProgress.hidden=true; startPanel.hidden=false;
+  setupTitle.textContent="Pipeline ready"; setupSub.textContent="Everything is loaded on the GPUs.";
+  setup.hidden=false;
 }
-
-function pollSelectionStatus() {
-  const iv = setInterval(async () => {
-    let status;
-    try {
-      status = await (await fetch("/api/selection/status")).json();
-    } catch (err) {
-      return;   // transient fetch failure — try again next tick
-    }
+function pollStatus(){
+  const iv=setInterval(async ()=>{
+    let status; try{ status=await (await fetch("/api/selection/status")).json(); }catch(e){ return; }
     showProgress(status);
-    if (status.phase === "ready") {
-      clearInterval(iv);
-      revealStartOverlay();
-    } else if (status.phase === "error") {
-      clearInterval(iv);
-      showModelSelectError(status.error || "Failed to load the selected models.");
-    }
-  }, 1000);
+    if(status.phase==="ready"){ clearInterval(iv); revealStart(); }
+    else if(status.phase==="error"){ clearInterval(iv); showSetupError(status.error||"Failed to load the selected models."); }
+  },1000);
 }
-
-async function confirmSelection() {
-  const selection = {};
-  for (const category of Object.keys(CATEGORY_LABELS)) {
-    const checked = document.querySelector(`input[name="${category}"]:checked`);
-    if (!checked) return showModelSelectError(`Please choose a ${CATEGORY_LABELS[category]} option.`);
-    selection[category] = checked.value;
+async function confirmSelection(){
+  const selection={};
+  for(const category of Object.keys(CATEGORY_LABELS)){
+    const checked=document.querySelector(`input[name="${category}"]:checked`);
+    if(!checked) return showSetupError(`Please choose a ${CATEGORY_LABELS[category]} option.`);
+    selection[category]=checked.value;
   }
-  confirmBtn.disabled = true;
-  try {
-    const resp = await fetch("/api/selection", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(selection),
-    });
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      throw new Error(err.detail || `request failed: ${resp.status}`);
-    }
-  } catch (err) {
-    console.error("Failed to submit selection:", err);
-    showModelSelectError("Failed to start loading: " + err.message);
-    confirmBtn.disabled = false;
-    return;
-  }
-  modelPicker.style.display = "none";
-  loadProgress.style.display = "block";
-  pollSelectionStatus();
+  confirmBtn.disabled=true; clearSetupError();
+  try{
+    const resp=await fetch("/api/selection",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(selection)});
+    if(!resp.ok){ const e=await resp.json().catch(()=>({})); throw new Error(e.detail||`request failed: ${resp.status}`); }
+  }catch(err){ console.error(err); showSetupError("Failed to start loading: "+err.message); confirmBtn.disabled=false; return; }
+  modelPicker.hidden=true; loadProgress.hidden=false;
+  setupTitle.textContent="Loading models"; setupSub.textContent="Starting the backends — this can take a couple of minutes on a cold start.";
+  pollStatus();
 }
-
-async function initModelSelect() {
+async function initModelSelect(){
+  if(!window.isSecureContext){
+    showSetupError("This page isn't on a secure origin (HTTPS or localhost), so the browser will block the microphone. You can still connect and type.");
+  }
   let status;
-  try {
-    status = await (await fetch("/api/selection/status")).json();
-  } catch (err) {
-    return showModelSelectError("Couldn't reach the token server: " + err.message);
-  }
-
-  // Handles a page reload mid-loading or after the pipeline is already up.
-  if (status.phase === "ready") return revealStartOverlay();
-  if (status.phase === "loading") {
-    modelPicker.style.display = "none";
-    loadProgress.style.display = "block";
-    showProgress(status);
-    pollSelectionStatus();
-    return;
-  }
-  if (status.phase === "error") return showModelSelectError(status.error || "Pipeline failed to load.");
-
+  try{ status=await (await fetch("/api/selection/status")).json(); }
+  catch(err){ return showSetupError("Couldn't reach the token server: "+err.message); }
+  if(status.phase==="ready") return revealStart();
+  if(status.phase==="loading"){ modelPicker.hidden=true; loadProgress.hidden=false; showProgress(status); pollStatus(); return; }
+  if(status.phase==="error") return showSetupError(status.error||"Pipeline failed to load.");
   let models;
-  try {
-    models = await (await fetch("/api/models")).json();
-  } catch (err) {
-    return showModelSelectError("Couldn't load available models: " + err.message);
-  }
-  renderChoices(document.getElementById("llmChoices"), "llm", models.llm || []);
-  renderChoices(document.getElementById("sttChoices"), "stt", models.stt || []);
-  renderChoices(document.getElementById("ttsChoices"), "tts", models.tts || []);
+  try{ models=await (await fetch("/api/models")).json(); }
+  catch(err){ return showSetupError("Couldn't load available models: "+err.message); }
+  renderChoices(document.getElementById("llmChoices"),"llm",models.llm||[]);
+  renderChoices(document.getElementById("sttChoices"),"stt",models.stt||[]);
+  renderChoices(document.getElementById("ttsChoices"),"tts",models.tts||[]);
   confirmBtn.addEventListener("click", confirmSelection);
 }
 
+startBtn.addEventListener("click", startCall);
 initModelSelect();
 </script>
 </body>

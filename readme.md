@@ -1,244 +1,254 @@
-# Voice Agent Pipeline (LiveKit)
+# Voice Agent Pipeline
 
-Real-time voice assistant: speech in → transcription → LLM response → cloned-voice speech out,
-built on [LiveKit](https://livekit.io/) instead of a bespoke WebSocket/VAD server. Same bank
-branch receptionist domain as the original `Pipeline/`: answers informational questions (branches,
-hours, services, contact info, and detailed product/fee/rate/policy questions grounded in its own
-documents), blocks a lost/stolen card after identity verification, and logs a callback request for
-a human. It still cannot check balances or make transactions.
+A real-time, fully **on-premises** voice assistant. A caller speaks in their browser; the system
+transcribes the speech, generates a grounded reply with a local language model, and speaks back in
+a cloned voice — every stage running on hardware you control, with no audio, transcript, or
+customer data ever leaving your network.
 
-`banking.py`, `db.py`, `rag.py`, `convo_log.py`, and `config/bank_config.json` are reused unchanged
-from the original `Pipeline/` — only the transport layer (WebSocket → LiveKit) and the
-STT/LLM/TTS wiring changed.
+The reference deployment answers as a retail-bank branch receptionist: it answers informational
+questions (branches, hours, services, contact details) and detailed product/fee/rate/policy
+questions grounded in its own documents, blocks a lost or stolen card after verifying the caller's
+identity, and logs a callback request for a human. It cannot check balances or move money — that
+boundary is enforced in code, not just the prompt.
+
+**What "on-premises" means here:**
+
+- **No cloud, no per-call fees, no external dependency in the inference path.** Speech recognition
+  (Whisper), the language model (Qwen 2.5 via vLLM), and voice synthesis (Chatterbox) all run
+  locally on your own GPUs.
+- **Self-hosted media server.** The WebRTC audio transport ([LiveKit](https://livekit.io/)) runs on
+  your LAN too — call audio never touches the public internet.
+- **Regulator-friendly.** Because customer speech and data stay inside your network, the system
+  suits banking and other settings where data cannot be sent to a third-party provider.
+
+The stack scales across two GPU machines: **box 1** runs the full pipeline on its own, and **box 2**
+optionally adds speech-processing capacity for more concurrent callers.
 
 ## Architecture
 
 ```
-Browser  ──WebRTC──▶  LiveKit SFU (box 1, Docker)
-                            │  job dispatch (WebSocket)
-                            ▼
-                     Agent worker (src/worker.py) — box 1 only
-                     — one process per active call, all workers centralized on box 1 —
-                            │
-              picks one pool member per call (Redis round-robin)
-                            │
-              ┌─────────────┼──────────────────────────────────┐
-              ▼             ▼                                   ▼
-            vLLM      Whisper pool                       Chatterbox pool
-       (box 1 only)  (box 1: 1, box 2: 3 — 4 total)   (box 1: 1, box 2: 3 — 4 total)
+        ┌───────────┐         WebRTC audio          ┌───────────────┐
+        │  Browser  │ ◀───────────────────────────▶ │  LiveKit SFU  │
+        │ (web/ UI) │   loads UI + access token      │ (self-hosted) │
+        └───────────┘   from the Token Server        └───────┬───────┘
+                                                             │ dispatches each call as a job
+                                                             ▼
+                                                    ┌───────────────┐
+                                    Redis ────────▶ │  Agent Worker │   one worker (box 1),
+                                 (round-robin pick)  │  (per call)   │   owns the DB + RAG data
+                                                    └──┬────┬────┬───┘
+                                       each turn:  STT ┘    │    └ TTS
+                                                        LLM │
+                        ┌────────────────────────────────────┼──────────────────────────────┐
+                        ▼                                     ▼                              ▼
+                ┌───────────────┐                    ┌───────────────┐             ┌───────────────┐
+                │  Whisper STT  │                    │  vLLM  (LLM)  │             │ Chatterbox TTS│
+                │     pool      │                    │  box 1 only   │             │     pool      │
+                └───────────────┘                    └───────────────┘             └───────────────┘
+                box 1 ×1 + box 2 ×3                                                box 1 ×1 + box 2 ×3
 ```
 
-- **LiveKit is the media server**, not this codebase — it handles the actual WebRTC
-  signaling/audio transport. `src/worker.py` is a *client* of it: it opens a persistent
-  connection, registers itself, and LiveKit dispatches each new call to it as a job.
-- **All agent workers run on box 1, deliberately** — not spread across boxes. A worker holds no
-  GPU model of its own (see next point), so running one on box 2 wouldn't add GPU capacity, and it
-  would mean two independent copies of `data/bank.db`/`data/rag_index.npy` that could silently
-  diverge. Centralizing on box 1 means every caller gets the same real banking/RAG data, regardless
-  of which Whisper/Chatterbox pool member handles their call.
-- **STT and TTS are shared HTTP microservice *pools***, not models loaded inside the call process.
-  A call's job process holds no GPU model of its own — it picks one pool member (round-robin via a
-  Redis counter, see Concurrency below) and makes HTTP requests to it for the call's whole
-  duration. This matters for concurrency: earlier, STT was loaded fresh *per call*, which OOM'd the
-  GPU on a second simultaneous caller — making it a shared, poolable service (like TTS already was)
-  fixed that. See `src/whisper_server.py` / `src/whisper_stt.py`.
-- **Nothing loads until you pick it.** `src/token_server.py` serves the browser's model-picker
-  screen first; only after you confirm an LLM/STT/TTS choice does `src/orchestrator.py` actually
-  start anything, per `config/models_config.json`.
-- **The GPU-heavy backends run in Docker** (`docker-compose.yml`, `Dockerfile.whisper`,
-  `Dockerfile.chatterbox`, `Dockerfile.worker`, and box 2's `docker-compose.pool.yml`) —
-  `orchestrator.py` launches box 1's on demand and polls `/health` for readiness. This isolates
-  their dependencies (CUDA/cuDNN versions, Python packages) from anything else on the host, and
-  from other unrelated projects sharing the same GPU box (box 2 runs several).
-- **This repo is fully self-contained — it doesn't build against the sibling `Pipeline/` repo.**
-  `chatterbox_server.py`, `Dockerfile.chatterbox`, and `assets/voice_seed/` all live here as a
-  deliberate *copy* of the originals in `Pipeline/` (the pre-LiveKit bare-metal assistant, which
-  keeps its own independent copy and still uses it directly). The two are meant to be able to
-  diverge — each pipeline is independently deployable without the other's directory present at
-  all, at the cost of the two `chatterbox_server.py` copies needing manual sync if one is
-  improved and the fix is relevant to both.
-- **Each Chatterbox instance can have a different voice** (`CHATTERBOX_VOICE_FILE`, baked into the
-  image from this repo's own `assets/voice_seed/`) — since a call keeps the same pool member for
-  its whole duration, one caller always hears one consistent voice, but different concurrent
-  callers can hear different-sounding agents.
+- **LiveKit** is the self-hosted media server; the **Agent Worker** is a client that receives each
+  call dispatched to it. Per conversational turn, the worker calls three local services over HTTP:
+  Whisper (speech-to-text) → vLLM (the LLM) → Chatterbox (text-to-speech).
+- **The Token Server** (`:3000`) serves the browser UI, issues signed LiveKit access tokens, and
+  enforces the concurrent-call limit. Nothing heavy starts until you pick models in the browser;
+  the **Orchestrator** then launches the Docker backends on demand.
+- **One worker, on box 1**, owns all call state — the SQLite database and the RAG document index —
+  so every caller reaches the same data. Box 2 adds only stateless speech-processing capacity.
 
-## Domain config
+### Concurrency
 
-All brand/company-specific data lives in `config/bank_config.json` (bank name, branches, hours,
-services, contact info) — re-read on every turn, no restart needed. The bot greets automatically
-the moment a call connects, using the same LLM+TTS pipeline as any other turn.
-
-## Repository layout
-
-```
-src/            worker.py (LiveKit agent — STT/LLM/TTS orchestration per call, round-robin pool
-                selection via _pick_pool_url),
-                token_server.py (auth + model-picker + static web/ host),
-                orchestrator.py (launches/tears down box 1's backends via Docker Compose),
-                whisper_server.py + whisper_stt.py (shared STT service + its client plugin),
-                chatterbox_server.py + chatterbox_tts.py (shared TTS service + its client plugin —
-                both live here; chatterbox_server.py is a deliberate copy of the one in the
-                sibling Pipeline/ repo, see Architecture),
-                banking.py, db.py, rag.py, convo_log.py, build_index.py, seed_db.py, show_db.py
-web/            Browser frontend (livekit-client) — index.html, vendor/
-config/         bank_config.json (swappable domain config), models_config.json (backend
-                catalog — id/label/launch params per LLM/STT/TTS option, plus extra_pool_urls for
-                box 2's Whisper/Chatterbox pool members), rag_docs/
-data/           bank.db, memory.json, rag_index.npy, fastembed_cache/ — gitignored,
-                regenerable/mutable, box 1 only (see Concurrency: why workers stay on box 1)
-assets/voice_seed/  Chatterbox reference clips (.wav) — CHATTERBOX_VOICE_FILE picks one per pool
-                instance at build/run time
-docker-compose.yml, docker-compose.pool.yml, Dockerfile.whisper, Dockerfile.chatterbox,
-Dockerfile.worker
-                Container definitions — docker-compose.yml is box 1 (see Architecture above);
-                docker-compose.pool.yml is box 2's standalone Whisper/Chatterbox pool (deployed via
-                ../sync-to-box2.sh into ~/box2-pool-node/ there, not part of this checkout's tree).
-                All build contexts resolve within this repo — no cross-repo dependency on Pipeline/
-livekit.yaml    Self-hosted LiveKit server config
-tests/          pytest suite (banking/RAG logic)
-plans/          Design/planning docs
-logs/           Runtime logs, plus each backend's Docker container log — gitignored
-run.sh          Starts LiveKit+Redis and the token server on box 1; everything else loads on demand
-```
-`../sync-to-PC.sh`, `../sync-to-box2.sh`, `../start-pipeline.sh`, `../stop-pipeline.sh` (one level
-up, alongside this repo's sibling `Pipeline/`) are the operator scripts — see Usage below.
+- **Pools:** 4 Whisper + 4 Chatterbox instances (box 1 ×1 + box 2 ×3 of each). The worker picks one
+  of each per call via a **Redis round-robin** counter, spreading concurrent calls across the pool.
+- **Admission cap:** 12 concurrent calls (`max_concurrent_calls` in `config/models_config.json`).
+  Past that, the Token Server returns HTTP 503 ("line is full") and the caller retries — there is no
+  queue. Up to 3 calls may briefly share one instance, which is fine because GPU compute per call is
+  spiky (sub-second bursts), not sustained.
+- **Graceful fallback:** box 2's pool members are health-checked when the worker launches; if box 2
+  is down, box 1 runs on its own instances with no dead entries in the rotation.
+- **Warm processes:** the single worker keeps 12 job-executor processes pre-warmed
+  (`num_idle_processes`), so admitted callers get zero cold-start delay.
 
 ## Models
 
 | Stage | Model | Parameters | Precision | Runs as |
 |-------|-------|------------|-----------|---------|
 | STT | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) `large-v3` | ~1.55B | INT8 (`int8_float16`) | pool of 4 (box 1: 1, box 2: 3), GPU |
-| LLM | Qwen2.5 14B Instruct (via vLLM) | 14.8B | AWQ (4-bit) | single instance, box 1 only, GPU |
+| LLM | Qwen 2.5 14B Instruct (via vLLM) | 14.8B | AWQ (4-bit) | single instance, box 1 only, GPU |
 | TTS | [Chatterbox Turbo](https://github.com/resemble-ai/chatterbox) | ~0.5B (T3) + S3Gen vocoder | voice-cloned per instance | pool of 4 (box 1: 1, box 2: 3), GPU |
 
-All three are swappable/extensible via `config/models_config.json` without touching code — it's
-the catalog the browser's model-picker reads from. Pool members beyond box 1's own instance are
-listed per-entry under `extra_pool_urls`.
+All three are swappable via `config/models_config.json` — the catalog the browser's model-picker
+reads from — without touching code.
 
-## Concurrency
+## Configuring for your organization
 
-**Pool sizes today: 4 Whisper instances, 4 Chatterbox instances** (1 of each on box 1, 3 of each
-on box 2's `docker-compose.pool.yml`) — measured live at ~2.17GB/Whisper instance and
-~3.5GB/Chatterbox instance on box 2's RTX 3090 (24.5GB), so box 2 alone is close to that card's
-real ceiling already; growing meaningfully past ~4 of each per box needs another GPU machine, not
-just a config change.
+The pipeline is domain-generic: the assistant's identity, knowledge, and models are all
+configuration, so the same code can serve a bank, a clinic, a utility, or any other
+informational-plus-actions voice desk. Three files drive it, no code changes required:
 
-**Pool sizes aren't additive, but sharing a pool member is fine at this scale.** Every call needs
-one Whisper instance *and* one Chatterbox instance at once — only 4 calls get a dedicated,
-uncontended instance of each; beyond that, calls share. **The admission cap is 12** (past that,
-`/api/token` returns 503, "line is full" — no queueing, a rejected caller just retries), which
-means up to 3 calls can share one pool instance at once. This works in practice because GPU
-*compute* utilization on Whisper/Chatterbox is spiky, not sustained — near-zero between turns, and
-only spikes for the sub-second burst of an actual transcription or synthesis call — so 2-3 calls
-interleaving their brief bursts on one instance mostly just queues microseconds of GPU work, not
-whole-turn latency. This is a different resource than the ~2-3.5GB *memory* each instance holds
-constantly regardless of how many calls share it.
+- **`config/bank_config.json`** — the organization's identity and facts (name, locations, hours,
+  services, contact info). Re-read on every turn, so edits take effect without a restart.
+- **`config/rag_docs/`** — the source documents the assistant grounds its detailed answers in (fees,
+  rates, policies, product details). Drop in your own documents and rebuild the index
+  (`src/build_index.py`) to retarget the knowledge base.
+- **`config/models_config.json`** — which LLM/STT/TTS to run, and the box-2 pool URLs.
 
-**Selection is round-robin via a Redis atomic counter** (`src/worker.py`'s `_pick_pool_url`,
-called once per call in `entrypoint()` — not per request), not random: with N simultaneous new
-calls and pool size ≥ N, each call deterministically lands on a *different* instance, confirmed
-live via 4 concurrent test calls hitting all 4 Whisper and all 4 Chatterbox instances with zero
-repeats. Past pool size, the counter wraps and spreads extra calls evenly rather than piling them
-onto whichever instance happens to be least busy. A call keeps its picked instance for its whole
-duration.
+To adapt to a new domain: replace `bank_config.json` with your organization's facts, put your
+documents in `rag_docs/` and rebuild the index, and adjust the assistant's prompt/tools if the task
+differs from the reference (informational Q&A and RAG are fully generic; a specialized action like
+card-blocking is application logic you would tailor to your workflow).
 
-**Box 2 pool members are health-checked once, at worker launch — not per call.**
-`orchestrator.py`'s `_launch_worker` builds `WHISPER_URLS`/`CHATTERBOX_URLS` by hitting each
-`extra_pool_urls` entry's `<host>:<port>/health` before including it; box 1's own local instance is
-always included unconditionally (already proven up earlier in the same launch). Any box 2 member
-that doesn't respond gets dropped from the list the worker ever sees, so if box 2's pool is down
-when the pipeline starts, every call just uses box 1 alone — no dead URLs in the round-robin
-rotation. This was a real bug, not a hypothetical: round-robin itself has no failover, so with box
-2 stopped mid-session while still listed, calls kept getting routed to it and failed outright (mic
-audio never reaching Whisper, agent replies never getting synthesized) while the call still visibly
-"connected" (LiveKit's room + the text greeting don't touch STT/TTS, so nothing on screen indicated
-a problem). **Known remaining gap**: this check is launch-time only — a pool member that dies while
-the worker is already running isn't detected until you relaunch.
+## Repository layout
 
-**There is exactly one worker, running on box 1 — not one per box.** Box 2 is pool-only (see
-Architecture): once Whisper/Chatterbox moved out of the worker process, a worker on box 2 would
-add no GPU capacity, only a second, divergeable copy of `data/bank.db`/`rag_index.npy`. Every call
-routes through this single worker regardless of which pool member ends up handling its STT/TTS.
+```
+Livekit Pipeline/
+├── src/
+│   ├── worker.py               # LiveKit agent: per-call STT→LLM→TTS + round-robin pool pick
+│   ├── token_server.py         # serves web/ UI, issues LiveKit tokens, enforces the call cap
+│   ├── orchestrator.py         # launches/stops the Docker backends, polls readiness
+│   ├── whisper_server.py       # shared Whisper STT microservice (FastAPI)
+│   ├── whisper_stt.py          # STT client plugin used by the worker
+│   ├── chatterbox_server.py    # shared Chatterbox TTS microservice (FastAPI)
+│   ├── chatterbox_tts.py       # TTS client plugin used by the worker
+│   ├── banking.py, db.py        # domain logic + SQLite access
+│   ├── rag.py, convo_log.py     # document retrieval + conversation logging
+│   └── seed_db.py, build_index.py, show_db.py   # setup / maintenance utilities
+├── web/                        # browser frontend (LiveKit client) — index.html, vendor/
+├── config/
+│   ├── bank_config.json        # domain content (name, branches, hours, services)
+│   ├── models_config.json      # backend catalog + box-2 pool URLs (extra_pool_urls)
+│   └── rag_docs/               # source documents the assistant grounds answers in
+├── assets/voice_seed/          # Chatterbox reference voice clips (.wav)
+├── data/                       # bank.db, memory.json, rag_index.npy, caches (gitignored)
+├── Dockerfile.whisper          # Whisper STT image
+├── Dockerfile.chatterbox       # Chatterbox TTS image
+├── Dockerfile.worker           # agent worker image
+├── docker-compose.yml          # box 1 stack (LiveKit, Redis, vLLM, Whisper, Chatterbox, worker)
+├── docker-compose.pool.yml     # box 2 pool (3× Whisper + 3× Chatterbox)
+├── livekit.yaml                # self-hosted LiveKit server config (API keys, ports)
+├── requirements.txt            # Python deps for the token server + worker (host, box 1)
+├── requirements-chatterbox.txt # Python deps baked into the Chatterbox image
+├── run.sh                      # box 1 launcher (LiveKit + Redis + token server)
+└── tests/                      # pytest suite (banking / RAG logic)
+```
 
-**`num_idle_processes=12` in `WorkerOptions`** (`src/worker.py`) matches the admission cap 1:1, not
-a coincidence — it's how many job-executor *processes* (LiveKit's own multiprocessing under this
-one worker registration) are kept pre-warmed for zero-latency dispatch. Sizing it to 12 means every
-admitted caller gets an already-warm process, no cold-spawn delay for anyone up to the cap. A
-second independent worker was considered and deliberately rejected: LiveKit's multiprocessing
-already gives you as many concurrent job-executor processes as needed under one worker, so a second
-worker (still on box 1 — box 2 isn't an option, see above) would just double registration/
-load-threshold overhead and add SQLite write-contention risk between two fully independent
-processes, without unlocking capacity a single worker's own process pool can't already provide.
-Each idle process holds its own prewarmed RAG/VAD state in RAM, so 12 idle processes is a real,
-constant CPU/RAM cost on box 1 — whether it comfortably sustains that, and how vLLM's own latency
-holds up under 12-way concurrent generation, hasn't been load-tested yet.
+## Setup
 
-## Usage
+Do this once per machine. Both boxes need Docker with GPU passthrough; **box 1** additionally needs
+the Python environment (the token server and orchestrator run on the host, not in Docker).
 
-**Prerequisites (each GPU box):** Docker + `nvidia-container-toolkit` (GPU passthrough — verify
-with `docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi` before assuming it
-works). Box 1 additionally needs a `.venv` with `requirements.txt` installed (`token_server.py`
-runs bare-metal there, not in Docker), `data/bank.db` seeded (`python3 src/seed_db.py`), and the
-RAG index built (`python3 src/build_index.py` — `run.sh` also does this automatically if missing).
+### 1. Prerequisites (both boxes)
 
-### From a dev machine with SSH access to both boxes (typical case)
+- An NVIDIA GPU (RTX 3090-class) with a recent driver.
+- **Docker Engine** + the **Docker Compose** plugin.
+- **NVIDIA Container Toolkit** for GPU passthrough into containers. Verify it works before
+  continuing:
 
-`../start-pipeline.sh` / `../stop-pipeline.sh` (one level up from this repo, alongside the sync
-scripts) drive both boxes over SSH — see their own comments for the exact mechanism. They assume
-`cognimind`/`cognimind2`-style SSH host aliases are already set up and that `../sync-to-PC.sh` /
-`../sync-to-box2.sh` have been run at least once (code deployed, images built).
+  ```bash
+  docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+  ```
+
+### 2. Clone
 
 ```bash
-./start-pipeline.sh        # box 1 only: vLLM + 1 Whisper + 1 Chatterbox + the worker
-./start-pipeline.sh -a     # also brings up box 2's pool (3 more Whisper + 3 more Chatterbox)
-./stop-pipeline.sh         # reverse — stop box 1 (graceful SIGINT to run.sh, same as Ctrl+C)
-./stop-pipeline.sh -a      # also stop box 2's pool
+git clone <repo-url>
+cd "Livekit Pipeline"
 ```
-Both are idempotent (safe to re-run; only start/report what isn't already up) and wait for real
-readiness rather than just firing requests and exiting.
 
-### Directly on box 1 (no dev machine / no SSH in the loop)
+### 3. Python environment — box 1 only
 
 ```bash
-cd "Livekit Pipeline" && ./run.sh
+python3 -m venv .venv
+.venv/bin/pip install --upgrade pip
+.venv/bin/pip install -r requirements.txt
 ```
-Starts LiveKit + Redis (Docker) and the token server, then open the printed URL — pick your
-LLM/STT/TTS in the browser, confirm, and the pipeline loads. `Ctrl+C` tears everything down,
-including any backend containers `orchestrator.py` started. This is what `start-pipeline.sh` runs
-remotely on your behalf — running it locally at box 1's own terminal is exactly equivalent.
 
-### Setting up from scratch with physical access only (no SSH between the boxes)
+### 4. Environment file — box 1 only
 
-If you're sitting at each machine directly rather than working from a dev machine with SSH to
-both — e.g. first-time setup, or SSH access genuinely isn't available — the scripts above don't
-apply, but the underlying steps are simple manual copies:
+Create `.env` in the repo root. `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` must match a key pair in
+`livekit.yaml` (`keys:`); the values below match the dev key shipped in this repo.
 
-**On box 1** (the LiveKit server + vLLM + the agent worker + its own Whisper/Chatterbox instance):
-1. Copy this `Livekit Pipeline/` directory onto box 1 (USB drive, local network share, `git
-   clone` — anything that isn't SSH from elsewhere). It's self-contained — no need to also copy
-   the sibling `Pipeline/` repo unless you're separately setting up the original bare-metal
-   assistant there too, which this guide doesn't cover.
-2. Follow the *Prerequisites* above on that machine, then `cd "Livekit Pipeline" && ./run.sh`.
-3. Open `http://localhost:3000` in a browser **on box 1 itself** (or box 1's own LAN/Tailscale
-   address from another device on the same network), pick models, confirm.
+```dotenv
+# LiveKit server (key/secret must match livekit.yaml `keys:`)
+LIVEKIT_URL=ws://127.0.0.1:7880
+LIVEKIT_API_KEY=devkey
+LIVEKIT_API_SECRET=Fh/JM5WbHJ466Ir9vfmtC9jDOaCZZQVYYFFWd/G7AiA=
 
-**On box 2** (just the Whisper/Chatterbox pool — no LiveKit, no worker, no `config/`/`data/`):
-1. Copy only what's needed to build the two pool images, preserving this exact relative layout —
-   `docker-compose.pool.yml` at the top level, with `Livekit Pipeline/` as a sibling beneath it
-   (mirrors what `../sync-to-box2.sh` pushes over SSH; see that script's own comments for the
-   precise file list — `Dockerfile.whisper` + `Dockerfile.chatterbox` + `requirements.txt` +
-   `requirements-chatterbox.txt` + `src/whisper_server.py` + `src/chatterbox_server.py` +
-   `assets/voice_seed/*.wav`, all under `Livekit Pipeline/`). No `Pipeline/` directory needed on
-   box 2 at all.
-2. Follow the *Prerequisites* above on that machine, then from the directory containing
-   `docker-compose.pool.yml`: `docker compose -f docker-compose.pool.yml up -d`.
-3. **Back on box 1**, edit `config/models_config.json`'s `stt`/`tts` entries — `extra_pool_urls`
-   needs box 2's *actual* LAN IP (defaults are hardcoded to this project's specific box 2; find
-   yours with `ip addr` on box 2 and update both lists to match, keeping the same ports:
-   `8768`-`8770` for Whisper, `8771`-`8773` for Chatterbox). Box 2 itself needs no configuration
-   pointing back at box 1 — the pool services are just plain HTTP servers with no awareness of who
-   calls them.
-4. Restart box 1's pipeline (`./run.sh` again, or just re-confirm the model selection in the
-   browser if it's already running) so the worker picks up the updated pool list.
+# Backend URLs — fallback defaults for running the worker directly. In normal operation the
+# orchestrator overrides these per the model selection confirmed in the browser.
+VLLM_URL=http://127.0.0.1:8000/v1
+VLLM_MODEL=qwen2.5-14b-awq
+WHISPER_URLS=http://127.0.0.1:8768/transcribe
+CHATTERBOX_URLS=http://127.0.0.1:8766/synthesize
+REDIS_URL=redis://127.0.0.1:6379
+```
 
-Run the tests with `pytest tests/ -q`.
+> For production, generate your own LiveKit secret and change it in **both** `livekit.yaml` and
+> `.env`. Use `127.0.0.1`, not `localhost`, for container-facing URLs (minimal container images
+> can't resolve the literal `localhost`).
+
+### 5. Seed the database and build the RAG index — box 1 only
+
+```bash
+.venv/bin/python src/seed_db.py        # creates data/bank.db
+.venv/bin/python src/build_index.py    # builds data/rag_index.npy from config/rag_docs/
+```
+
+(`run.sh` also builds the RAG index automatically if it's missing.)
+
+### 6. Docker images
+
+- **Box 1** — LiveKit, Redis, and vLLM use prebuilt images (pulled on first run). The Whisper,
+  Chatterbox, and worker images build automatically the first time the orchestrator launches them.
+  To build them ahead of time:
+
+  ```bash
+  docker compose --profile on-demand build
+  ```
+
+- **Box 2** — the two pool images build on the first `docker compose -f docker-compose.pool.yml
+  up -d`. On a fresh machine, bring the instances up **one at a time** the first time, so six
+  simultaneous model-weight downloads don't contend for bandwidth.
+
+## Running
+
+Launch each machine directly at its own terminal — no SSH required. **Box 1 alone is a complete,
+working pipeline**; add box 2 only to scale the pools.
+
+### Box 1 (main node)
+
+From the repo root:
+
+```bash
+./run.sh
+```
+
+This starts LiveKit + Redis (Docker) and the token server, and prints a URL. Open it in a browser
+— on box 1 itself, or from any device on the same LAN using box 1's IP address — choose your
+LLM/STT/TTS, and confirm. The orchestrator then launches vLLM, Whisper, Chatterbox, and the worker
+on demand. `Ctrl+C` tears everything down.
+
+### Box 2 (optional pool node)
+
+On box 2, from the directory containing `docker-compose.pool.yml`:
+
+```bash
+docker compose -f docker-compose.pool.yml up -d      # start 3× Whisper + 3× Chatterbox
+docker compose -f docker-compose.pool.yml ps         # check status / health
+docker compose -f docker-compose.pool.yml down       # stop
+```
+
+### Pointing box 1 at box 2
+
+Box 1 finds box 2's pool through `config/models_config.json` — each `stt` / `tts` entry's
+`extra_pool_urls`. Set these to box 2's LAN IP (find it with `ip addr` on box 2), keeping the
+ports: Whisper `8768`–`8770`, Chatterbox `8771`–`8773`. Then re-confirm the model selection in the
+browser so the worker picks up the pool. If box 2 is down when box 1 starts, box 1 automatically
+falls back to its own instances.
+
+### Tests
+
+```bash
+pytest tests/ -q
+```
