@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Starts the always-on pieces of the LiveKit voice agent pipeline: LiveKit server + Redis
-# (docker compose) and the token server (serves Bank/web/, issues LiveKit access tokens, and hosts
+# (docker compose) and the token server (serves web/, issues LiveKit access tokens, and hosts
 # the model-selection orchestrator). vLLM, the Chatterbox TTS microservice, and the agent worker
 # are no longer started here — src/orchestrator.py launches those on demand, once you've picked
 # your LLM/STT/TTS in the browser and confirmed (see config/models_config.json for the available
@@ -49,7 +49,7 @@ until curl -s -o /dev/null "http://localhost:7880/"; do
 done
 echo "LiveKit ready."
 
-echo "Starting token server (also serves Bank/web/) on port $TOKEN_SERVER_PORT..."
+echo "Starting token server (also serves web/) on port $TOKEN_SERVER_PORT..."
 echo "Open http://localhost:$TOKEN_SERVER_PORT (use this box's LAN/Tailscale address instead of"
 echo "localhost if you're connecting from another machine) to pick your models and load the"
 echo "pipeline — nothing else starts until you confirm a selection there."
