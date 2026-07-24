@@ -1,35 +1,3 @@
-"""
-Compatibility layer between the LiveKit agent and the pure-Python business
-logic in ./hospital_core/ (booking.py, rag.py, safety.py, hospital_kb.py).
-
-STATUS: the four REAL modules are present in hospital_core/ and verified in
-this revision (safety 15/15, booking ALL PASS, KB validation PASS, rag on
-its keyword fallback pending sentence-transformers). Every canonical
-signature and return shape below now mirrors the REAL booking.py exactly:
-
-  - check_availability(department, date=None, doctor=None)
-      -> {"status": "ok", "slots": [ {doctor,date,time}, ... ] (FLAT list),
-          "alternatives": [...] when a date has none} | clarify | not_found
-  - book_appointment(patient_name, department, date, time, doctor=None)
-      -> booked (+booking_id, patient_name, message) | unavailable
-         (+alternatives) | error
-  - cancel_appointment(patient_name, date=None, department=None, time=None)
-      -> cancelled | not_found | ambiguous (+matches)
-  - update_appointment(patient_name, new_date=None, new_time=None,
-                       date=None, department=None, time=None)
-      -> updated | unavailable | no_change | not_found | ambiguous
-  - search_hospital_info(query) -> {"status": "ok", "answer"} | not_found
-  - run_safety_gate(text) -> None | {emergency, category, kind,
-                                     matched_text, message}
-
-The built-in fallbacks (used only if a hospital_core file is deleted)
-return these SAME shapes, so agent.py and the frontend never care which
-layer answered.
-
-SIGNATURE SAFETY: real functions are still called through _call(), which
-passes only the kwargs the target accepts and awaits coroutines - so small
-future signature drift degrades gracefully instead of crashing.
-"""
 
 from __future__ import annotations
 

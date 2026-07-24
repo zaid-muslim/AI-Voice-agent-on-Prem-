@@ -1,63 +1,3 @@
-"""
-Riverside General voice receptionist - LiveKit Agents port, SOTA revision.
-
-Architecture (what changed vs the Pipecat version, and what didn't):
-
-  Pipecat                                 LiveKit (this file)
-  ---------------------------------------------------------------------------
-  Pipeline([...]) frame graph          -> AgentSession(vad, stt, llm, tts,
-                                          turn_detection)
-  SafetyGateProcessor (FrameProcessor  -> on_user_turn_completed() hook:
-    swallowing TranscriptionFrame)        runs run_safety_gate() on the final
-                                          transcript, speaks the escalation
-                                          via session.say(), and raises
-                                          StopResponse() so the LLM NEVER
-                                          generates for that turn.
-  faster-whisper STT                   -> Any of 4 STT engines (whisper,
-                                          Parakeet, Canary), chosen via
-                                          system_config.json (edit through
-                                          the dev console at :7871), not
-                                          a fixed env var.
-  tuned VAD stop_secs (0.3, risky)     -> Silero VAD + the semantic turn-
-                                          detector model.
-  register_direct_function(...)        -> @function_tool methods below,
-                                          signatures matching the REAL
-                                          hospital_core/booking.py exactly
-                                          (incl. department/time narrowing
-                                          for ambiguous cancels).
-  tool_filler decorator                -> run_with_filler() inside each tool
-  manual FastAPI signaling server      -> DELETED. livekit-server does all
-                                          signaling; token_server.py only
-                                          mints join tokens + serves the UI.
-  vLLM/RAG/TTS warm-ups at startup     -> prewarm_fnc + entrypoint warm-ups
-
-  --- NEW IN THIS REVISION ---
-  Qwen TTS subprocess-per-call         -> Qwen3-TTS served persistently on a
-    (QwenSubprocessTTS, one process       SECOND machine (PC2) via vLLM-Omni,
-    spawned per session)                  exposing an OpenAI-compatible
-                                           /v1/audio/speech endpoint. This
-                                           agent now just makes plain HTTP
-                                           calls to it via livekit.plugins
-                                           .openai.TTS(), the SAME plugin
-                                           class already used below for the
-                                           vLLM LLM connection - just pointed
-                                           at PC2's IP instead of localhost.
-                                           One persistent warm server, shared
-                                           by every room/session, instead of
-                                           a fresh process spawned per call.
-                                           The old QwenSubprocessTTS path is
-                                           preserved and still selectable via
-                                           system_config (engine=
-                                           "qwen_local_subprocess") as a
-                                           fallback if PC2 is ever
-                                           unreachable.
-
-Run (after README setup):
-    python agent.py dev        # hot-reload dev worker
-    python agent.py console    # terminal mode: local mic/speaker, no server
-    python agent.py start      # production mode
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -133,26 +73,7 @@ QWEN_OMNI_VOICE = os.environ.get("QWEN_OMNI_VOICE", "Aiden")
 
 
 def _make_stt(stt_cfg: dict):
-    """Chosen by stt_cfg = {"engine": ..., "model": ...} from
-    system_config (schema v2 - see that module's docstring for why this
-    changed from a flat backend string).
 
-    engine="parakeet" fallback chain, in order:
-      1. PARAKEET_PYTHON is set -> subprocess plugin. This is the path that
-         actually works when the main agent's venv is Python 3.12, since
-         NeMo's ASR extras currently fail to build there (see README) -
-         Parakeet runs isolated in its own 3.10/3.11 venv instead.
-      2. PARAKEET_PYTHON unset but `nemo` importable HERE -> in-process
-         plugin (only works if your main venv itself is 3.10/3.11).
-      3. Neither -> faster-whisper, the proven fallback.
-
-    engine="canary" needs CANARY_PYTHON/CANARY_WORKER (same NeMo venv as
-    Parakeet typically works - see plugins/canary_worker.py). Falls back
-    to whisper if that infra isn't set, same pattern as parakeet.
-
-    engine="whisper" (or anything unrecognized) -> faster-whisper, using
-    stt_cfg["model"] as the specific checkpoint name (e.g.
-    "distil-large-v3" or "large-v3" - same plugin code, different size)."""
     engine = stt_cfg.get("engine", "whisper")
     model = stt_cfg.get("model", WHISPER_MODEL)
 
@@ -195,27 +116,7 @@ def _make_stt(stt_cfg: dict):
 
 
 def _make_tts(tts_cfg: dict):
-    """Chosen by tts_cfg = {"engine": ..., "model": ...} from
-    system_config (schema v2). "model" means different things per engine:
-    Qwen (remote) -> served model path/repo id on PC2, Chatterbox -> unused
-    (single default voice), Kokoro -> voice pack name, Piper -> .onnx file
-    path.
 
-    DEFAULT ENGINE IS NOW "qwen_omni": Qwen3-TTS served persistently on
-    PC2 via vLLM-Omni's OpenAI-compatible /v1/audio/speech endpoint. This
-    is a plain HTTP call via livekit.plugins.openai.TTS() - the same
-    plugin class already used for the vLLM LLM connection in entrypoint()
-    below, just pointed at PC2 instead of localhost. One warm, shared
-    server across every room/session - no per-call subprocess spawn.
-
-    engine="qwen_local_subprocess" preserves the OLD behavior (spawns a
-    fresh QwenSubprocessTTS per session, on THIS machine) as an explicit
-    fallback - e.g. if PC2 is ever offline/unreachable.
-
-    Every other candidate engine below still falls back to Qwen (remote)
-    if its required env vars aren't set - same graceful-degradation
-    pattern used throughout this project rather than crashing the call.
-    """
     engine = tts_cfg.get("engine", "qwen_omni")
     model = tts_cfg.get("model", "")
 
@@ -760,20 +661,8 @@ if __name__ == "__main__":
         agents.WorkerOptions(
             entrypoint_fnc=entrypoint,
             prewarm_fnc=prewarm,
-            # DEFAULT IS 10s. prewarm() chains Silero VAD -> STT (whisper,
-            # in-process Parakeet, or the Parakeet SUBPROCESS which itself
-            # needs ~15-20s to load in its own venv) -> the RAG
-            # sentence-transformers embedder. On a cold cache, or under GPU
-            # contention from vLLM/Qwen already running, that chain can
-            # exceed even a generous ceiling - and LiveKit kills the whole
-            # process the instant it's exceeded, sometimes mid-report (a
-            # BrokenPipeError from the Parakeet worker trying to write
-            # "ready" to an already-closed parent pipe is the signature of
-            # this exact race). 300s gives real headroom for the worst
-            # case: first-time downloads AND three GPU processes competing
-            # for the same card. Once everything is warm/cached, prewarm
-            # actually finishes in a fraction of this - the timeout only
-            # costs anything on a failure, never on the happy path.
+            # 300s gives real headroom for the worst
+            # case
             initialize_process_timeout=300.0,
         )
     )
