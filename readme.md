@@ -142,6 +142,19 @@ repeats. Past pool size, the counter wraps and spreads extra calls evenly rather
 onto whichever instance happens to be least busy. A call keeps its picked instance for its whole
 duration.
 
+**Box 2 pool members are health-checked once, at worker launch — not per call.**
+`orchestrator.py`'s `_launch_worker` builds `WHISPER_URLS`/`CHATTERBOX_URLS` by hitting each
+`extra_pool_urls` entry's `<host>:<port>/health` before including it; box 1's own local instance is
+always included unconditionally (already proven up earlier in the same launch). Any box 2 member
+that doesn't respond gets dropped from the list the worker ever sees, so if box 2's pool is down
+when the pipeline starts, every call just uses box 1 alone — no dead URLs in the round-robin
+rotation. This was a real bug, not a hypothetical: round-robin itself has no failover, so with box
+2 stopped mid-session while still listed, calls kept getting routed to it and failed outright (mic
+audio never reaching Whisper, agent replies never getting synthesized) while the call still visibly
+"connected" (LiveKit's room + the text greeting don't touch STT/TTS, so nothing on screen indicated
+a problem). **Known remaining gap**: this check is launch-time only — a pool member that dies while
+the worker is already running isn't detected until you relaunch.
+
 **There is exactly one worker, running on box 1 — not one per box.** Box 2 is pool-only (see
 Architecture): once Whisper/Chatterbox moved out of the worker process, a worker on box 2 would
 add no GPU capacity, only a second, divergeable copy of `data/bank.db`/`rag_index.npy`. Every call

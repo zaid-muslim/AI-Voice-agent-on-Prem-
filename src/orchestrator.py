@@ -18,6 +18,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -302,6 +303,45 @@ async def _launch_chatterbox(entry: dict) -> None:
     STATE.backends["tts"] = BackendState("ready")
 
 
+async def _pool_member_healthy(url: str) -> bool:
+    """Reachability check for one extra_pool_urls member (box 2) — derives <host>:<port>/health
+    from the pool URL's own /transcribe or /synthesize path. Round-robin (worker.py's
+    _pick_pool_url) has no failover of its own: it blindly cycles through whatever URL list it's
+    given, so a downed box 2 while still listed gets picked on its turn and every STT/TTS call
+    routed to it fails outright — confirmed live (box 2 offline mid-session produced silent
+    no-mic-input, no-agent-audio calls with no error surfaced to the caller). Checking here, once
+    at worker launch, keeps that failure mode out of the hot path entirely."""
+    parsed = urlsplit(url)
+    health_url = f"{parsed.scheme}://{parsed.netloc}/health"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(health_url, timeout=aiohttp.ClientTimeout(total=2)):
+                return True
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        return False
+
+
+async def _filter_live_pool_urls(urls: list[str]) -> list[str]:
+    """urls[0] is always box 1's own local instance — already proven up by this point (its
+    _launch_whisper/_launch_chatterbox readiness poll ran before _launch_worker), so it's kept
+    unconditionally. Any extra_pool_urls (box 2) are health-checked in parallel and dropped if
+    unreachable, so the round-robin list the worker gets only ever contains live members — box 2
+    down at launch time means "rely on box 1 only" instead of every Nth call silently failing."""
+    if len(urls) <= 1:
+        return urls
+    local, *extra = urls
+    results = await asyncio.gather(*(_pool_member_healthy(u) for u in extra))
+    live_extra = [u for u, ok in zip(extra, results) if ok]
+    dropped = len(extra) - len(live_extra)
+    if dropped:
+        print(
+            f"  [pool] {dropped}/{len(extra)} extra pool member(s) unreachable at launch — "
+            f"excluding from round-robin: {[u for u, ok in zip(extra, results) if not ok]}",
+            flush=True,
+        )
+    return [local] + live_extra
+
+
 async def _launch_worker(llm_entry: dict, stt_entry: dict, tts_entry: dict) -> None:
     """Launch the LiveKit agent worker container. It reaches vLLM over HTTP at 127.0.0.1:<port>
     (host networking — see docker-compose.yml's worker service comment for why), and reaches
@@ -322,6 +362,8 @@ async def _launch_worker(llm_entry: dict, stt_entry: dict, tts_entry: dict) -> N
     chatterbox_urls = [f"http://127.0.0.1:{tts_entry['port']}{tts_entry['url_path']}"] + tts_entry.get(
         "extra_pool_urls", []
     )
+    whisper_urls = await _filter_live_pool_urls(whisper_urls)
+    chatterbox_urls = await _filter_live_pool_urls(chatterbox_urls)
     env_overrides = {
         "VLLM_URL": f"http://127.0.0.1:{llm_entry['port']}/v1",
         "VLLM_MODEL": llm_entry["served_model_name"],
