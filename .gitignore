@@ -1,11 +1,11 @@
-cat <<EOF > .gitignore
-# Virtual environments
-vllm_venv/
-.venv-brain/
-.venv-voice/
-.venv/
-env/
+# Virtual environments (each STT/TTS candidate engine gets its own isolated
+# venv - see README's "candidate engines" section for why)
 venv/
+env/
+.venv/
+.venv-*/
+vllm_venv/
+.vllm_venv/
 
 # Python caches and compiles
 __pycache__/
@@ -14,7 +14,25 @@ __pycache__/
 *.pyd
 .pytest_cache/
 
-# Local configuration and environment variables
+# Model weights (large, fetched separately - see README setup steps)
+models/
+
+# Runtime data - the real hospital_bookings.db lives on disk and is
+# volume-mounted into containers (see docker/docker-compose.yml), but is
+# NOT committed: it's mutable, per-deployment data, not source.
+*.db
+*.db-wal
+*.db-shm
+latency_log.jsonl
+
+# Vendored/third-party source checked out locally but not part of this repo
+# (its own git history - see remote/qwen_tts_server/README for setup)
+remote_services/
+
+# Dead/abandoned experiments kept around locally for reference
+archive/
+
+# Local configuration and secrets
 .env
 .env.local
 
@@ -22,10 +40,10 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# Audio / model caches if any
+# Audio / misc scratch output
 *.wav
 *.mp3
 *.bin
 *.pt
 *.safetensors
-EOF
+data/

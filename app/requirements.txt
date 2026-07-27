@@ -1,0 +1,23 @@
+# Core agent: LiveKit worker (main.py), token/admin/dev FastAPI servers.
+# Candidate STT/TTS engines (parakeet, canary, chatterbox, kokoro, piper) run
+# in their OWN isolated venvs via subprocess and are NOT installed here - see
+# the README's "candidate engines" section for those.
+"livekit-agents[openai,silero,turn-detector]~=1.0"
+livekit-api
+livekit
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-dotenv
+loguru
+aiohttp
+numpy>=1.24
+
+# In-process STT fallback (plugins/whisper_stt.py) - the default STT engine
+# is the shared stt_service/server.py instead (see SHARED_STT_BASE_URL), but
+# this stays installed here as the automatic per-worker fallback if that
+# service is unreachable.
+faster-whisper>=1.0.0
+
+# Optional: semantic search for hospital_core/rag.py. Falls back to keyword
+# search automatically if not installed (see rag.py).
+sentence-transformers

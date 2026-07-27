@@ -1,0 +1,40 @@
+# PC2 ("TTS box") stack - runs on the SECOND machine, separately from
+# docker-compose.yml. Copy the repo (or at least remote/qwen_tts_server/ and
+# models/qwen3-tts/) to PC2 and run from there:
+#   docker compose -f docker/docker-compose.pc2.yml up -d --build
+#
+# PC1's agent reaches this over the network via QWEN_OMNI_BASE_URL in
+# app/.env - point it at this machine's LAN IP and port 8091.
+name: riverside-tts-box
+
+services:
+  qwen-omni:
+    build:
+      context: ../remote/qwen_tts_server
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - ../models/qwen3-tts:/models/qwen3-tts:ro
+      - qwen-hf-cache:/root/.cache/huggingface
+    command:
+      - /models/qwen3-tts/${QWEN_OMNI_MODEL_DIR:-Qwen3-TTS-12Hz-1.7B-CustomVoice}
+      - --omni
+      - --port
+      - "8091"
+    ports:
+      - "8091:8091"
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request as u; u.urlopen('http://localhost:8091/health', timeout=3)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 180s
+    restart: unless-stopped
+
+volumes:
+  qwen-hf-cache:

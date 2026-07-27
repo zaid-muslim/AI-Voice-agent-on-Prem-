@@ -1,0 +1,25 @@
+# docker/app.Dockerfile and docker/stt.Dockerfile build with `context: ..`
+# (the repo root) so they can COPY specific subdirs (app/, stt_service/).
+# Without this file, `docker build` would try to tar up this repo's ~80GB+
+# of model weights and leftover virtualenvs as build context first - none
+# of which any image actually needs (models are volume-mounted at runtime,
+# see docker-compose.yml).
+.git
+venv/
+.venv*/
+models/
+archive/
+remote_services/
+data/
+tests/
+node_modules/
+**/__pycache__/
+*.pyc
+*.db
+*.db-wal
+*.db-shm
+*.jsonl
+*.wav
+*.mp3
+.env
+.env.local

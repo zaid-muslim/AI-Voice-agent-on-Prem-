@@ -1,0 +1,151 @@
+# PC1 stack: everything except the remote Qwen-Omni TTS box (that's
+# docker-compose.pc2.yml, run on the second machine). Run from the repo
+# root with:
+#   docker compose -f docker/docker-compose.yml up -d --build
+#
+# Needs the NVIDIA Container Toolkit installed on the host (confirmed
+# present: `docker info | grep -i runtime` should list `nvidia`).
+name: riverside-voice-agent
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+
+services:
+  livekit-server:
+    image: livekit/livekit-server:latest
+    command: ["--config", "/etc/livekit.yaml", "--dev"]
+    volumes:
+      - ../app/livekit.yaml:/etc/livekit.yaml:ro
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "50000-60000:50000-60000/udp"
+    restart: unless-stopped
+
+  vllm:
+    image: vllm/vllm-openai:latest
+    <<: *gpu
+    environment:
+      - VLLM_ATTENTION_BACKEND=TRITON_ATTN
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
+    volumes:
+      - ../models:/models:ro
+      - ../chat_templates:/chat_templates:ro
+      - vllm-hf-cache:/root/.cache/huggingface
+    # Same flags as scripts/run_vllm.sh - see that file's comments for the
+    # full GPU-memory-budget reasoning behind each value on a 24GB card.
+    command: >
+      --model /models/gemma-4-12b-w4a16
+      --served-model-name gemma-4-12b
+      --host 0.0.0.0 --port 8000
+      --max-model-len 4096
+      --limit-mm-per-prompt '{"audio": 1}'
+      --max-num-seqs 4
+      --gpu-memory-utilization ${VLLM_GPU_MEM_UTIL:-0.50}
+      --kv-cache-dtype bfloat16
+      --generation-config vllm
+      --disable-log-stats
+      --enable-auto-tool-choice
+      --tool-call-parser gemma4
+      --chat-template /chat_templates/tool_chat_template_gemma4.jinja
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request as u; u.urlopen('http://localhost:8000/health', timeout=3)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 120s
+    restart: unless-stopped
+
+  stt-service:
+    build:
+      context: ..
+      dockerfile: docker/stt.Dockerfile
+    <<: *gpu
+    environment:
+      - STT_MODEL=${STT_MODEL:-distil-large-v3}
+      - STT_NUM_WORKERS=${STT_NUM_WORKERS:-4}
+    volumes:
+      - stt-hf-cache:/root/.cache/huggingface
+    ports:
+      - "8020:8020"
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request as u; u.urlopen('http://localhost:8020/health', timeout=3)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: ..
+      dockerfile: docker/app.Dockerfile
+    <<: *gpu
+    command: ["python3", "main.py", "start"]
+    env_file:
+      - ../app/.env
+    environment:
+      - VLLM_BASE_URL=http://vllm:8000/v1
+      - SHARED_STT_BASE_URL=http://stt-service:8020
+      - LIVEKIT_URL=ws://livekit-server:7880
+    volumes:
+      - ../app/hospital_core:/srv/app/hospital_core
+    depends_on:
+      livekit-server:
+        condition: service_started
+      vllm:
+        condition: service_healthy
+      stt-service:
+        condition: service_healthy
+    restart: unless-stopped
+
+  token-server:
+    build:
+      context: ..
+      dockerfile: docker/app.Dockerfile
+    command: ["uvicorn", "token_server:app", "--host", "0.0.0.0", "--port", "7860"]
+    env_file:
+      - ../app/.env
+    environment:
+      - LIVEKIT_URL=ws://livekit-server:7880
+    ports:
+      - "7860:7860"
+    depends_on:
+      - livekit-server
+    restart: unless-stopped
+
+  admin-server:
+    build:
+      context: ..
+      dockerfile: docker/app.Dockerfile
+    command: ["uvicorn", "admin_server:app", "--host", "0.0.0.0", "--port", "7870"]
+    env_file:
+      - ../app/.env
+    volumes:
+      - ../app/hospital_core:/srv/app/hospital_core
+    ports:
+      - "7870:7870"
+    restart: unless-stopped
+
+  dev-server:
+    build:
+      context: ..
+      dockerfile: docker/app.Dockerfile
+    command: ["uvicorn", "dev_server:app", "--host", "0.0.0.0", "--port", "7871"]
+    env_file:
+      - ../app/.env
+    ports:
+      - "7871:7871"
+    restart: unless-stopped
+
+volumes:
+  vllm-hf-cache:
+  stt-hf-cache:
