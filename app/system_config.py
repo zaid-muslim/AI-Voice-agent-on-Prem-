@@ -57,9 +57,9 @@ _DEFAULT_CONFIG: dict[str, Any] = {
         "display_name": "Gemma 4 12B (w4a16)",
     },
     "stt": {
-        "engine": "whisper",
+        "engine": "whisper_shared",
         "model": "distil-large-v3",
-        "display_name": "Whisper distil-large-v3 (proven default)",
+        "display_name": "Whisper distil-large-v3 (shared service, default)",
     },
     "tts": {
         "engine": "qwen",
@@ -69,7 +69,7 @@ _DEFAULT_CONFIG: dict[str, Any] = {
 }
 
 _VALID_TTS_ENGINES = {"qwen", "chatterbox", "kokoro", "piper"}
-_VALID_STT_ENGINES = {"whisper", "parakeet", "canary"}
+_VALID_STT_ENGINES = {"whisper_shared", "whisper", "parakeet", "canary"}
 
 
 def get_config() -> dict:

@@ -97,10 +97,10 @@ VLLM_ATTENTION_BACKEND=TRITON_ATTN vllm serve \
     --served-model-name gemma-4-12b \
     --host 0.0.0.0 \
     --port 8000 \
-    --max-model-len 16384 \
+    --max-model-len 4096 \
     --limit-mm-per-prompt '{"audio": 1}' \
-    --max-num-seqs 1 \
-    --gpu-memory-utilization 0.55 \
+    --max-num-seqs 4 \
+    --gpu-memory-utilization 0.50 \
     --kv-cache-dtype bfloat16 \
     --generation-config vllm \
     --disable-log-stats \

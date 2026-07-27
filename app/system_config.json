@@ -5,9 +5,9 @@
     "display_name": "Gemma 4 12B (w4a16)"
   },
   "stt": {
-    "engine": "whisper",
+    "engine": "whisper_shared",
     "model": "distil-large-v3",
-    "display_name": "Whisper distil-large-v3 (proven default)"
+    "display_name": "Whisper distil-large-v3 (shared service, default)"
   },
   "tts": {
     "engine": "qwen",
