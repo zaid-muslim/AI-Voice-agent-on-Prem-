@@ -84,7 +84,7 @@ class QwenSubprocessTTS(tts.TTS):
         )
         self._worker_script = worker_script or os.environ.get(
             "QWEN_WORKER",
-            "/home/nauyan/voice-agent-pipeline/src_2/services/qwen_worker.py",
+            "/home/nauyan/voice-agent-pipeline/app/plugins/workers/qwen_worker.py",
         )
         self._model_id = model_id or os.environ.get(
             "QWEN_MODEL_ID",

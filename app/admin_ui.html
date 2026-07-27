@@ -35,14 +35,12 @@
   header {
     background: var(--card);
     border-bottom: 2px solid var(--line-strong);
-    padding: 18px 28px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+    padding: 18px 28px 0;
     position: sticky;
     top: 0;
     z-index: 20;
   }
+  header .top-row { display: flex; align-items: center; justify-content: space-between; padding-bottom: 14px; }
   header .brand { font-weight: 800; letter-spacing: -0.01em; font-size: 18px; }
   header .brand span { color: var(--desk); }
   header .sub {
@@ -54,6 +52,16 @@
     margin-top: 2px;
   }
   .wrap { max-width: 980px; margin: 0 auto; padding: 24px 28px 120px; }
+
+  .tabs { display: flex; gap: 4px; max-width: 980px; margin: 0 auto; }
+  .tab {
+    font-family: "Archivo", sans-serif; font-weight: 700; font-size: 14px;
+    padding: 10px 18px; border: none; background: transparent; color: var(--ink-soft);
+    cursor: pointer; border-bottom: 3px solid transparent; border-radius: 0;
+  }
+  .tab.active { color: var(--desk); border-bottom-color: var(--desk); }
+  .panel { display: none; }
+  .panel.active { display: block; }
 
   .toolbar {
     display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
@@ -98,7 +106,7 @@
   .cat-doctors .bar { background: var(--cardiology); }
   .cat-departments .bar { background: var(--desk); }
 
-  .entry {
+  .entry, .card {
     background: var(--card);
     border: 1.5px solid var(--line);
     border-radius: 12px;
@@ -106,7 +114,6 @@
     margin-bottom: 12px;
   }
   .entry.dirty { border-color: var(--warn); box-shadow: 0 0 0 3px rgba(217,147,13,0.12); }
-  .entry.removing { opacity: 0.45; }
   .entry-top {
     display: flex; gap: 12px; align-items: flex-start;
     margin-bottom: 10px;
@@ -177,33 +184,145 @@
 
   .empty { color: var(--ink-soft); font-style: italic; padding: 40px; text-align: center; }
   .hint { font-size: 12.5px; color: var(--ink-soft); margin-top: -6px; margin-bottom: 16px; }
+
+  /* --- Doctor schedules tab ------------------------------------------- */
+  .sched-layout { display: grid; grid-template-columns: 260px 1fr; gap: 20px; align-items: start; }
+  @media (max-width: 760px) { .sched-layout { grid-template-columns: 1fr; } }
+
+  .doctor-list { display: flex; flex-direction: column; gap: 8px; }
+  .doctor-pick {
+    text-align: left; display: flex; flex-direction: column; gap: 2px;
+    padding: 10px 12px;
+  }
+  .doctor-pick.active { border-color: var(--desk); background: #eef4fa; }
+  .doctor-pick .name { font-weight: 700; font-size: 14px; }
+  .doctor-pick .meta { font-size: 12px; color: var(--ink-soft); font-family: "IBM Plex Mono", monospace; }
+
+  .slot-grid { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+  .slot-chip {
+    font-family: "IBM Plex Mono", monospace; font-size: 12.5px;
+    border: 1.5px solid var(--line-strong); border-radius: 7px;
+    padding: 6px 10px; display: flex; align-items: center; gap: 8px;
+    background: #fcfcfd;
+  }
+  .slot-chip.booked { background: #fbf1dd; border-color: var(--warn); }
+  .slot-chip .x {
+    cursor: pointer; color: var(--ink-soft); font-weight: 700; line-height: 1;
+  }
+  .slot-chip .x:hover { color: var(--err); }
+  .slot-chip.booked .x { display: none; }
+
+  .day-by-day { display: flex; flex-direction: column; gap: 14px; }
+  .day-group .day-label {
+    font-family: "IBM Plex Mono", monospace; font-size: 12.5px; font-weight: 600;
+    color: var(--ink-soft); margin-bottom: 6px;
+  }
+
+  .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+  .weekday-row { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0 2px; }
+  .weekday-btn {
+    padding: 6px 10px; font-size: 12.5px; border-radius: 6px;
+  }
+  .weekday-btn.on { background: var(--desk); color: #fff; border-color: var(--desk); }
+
+  .mode-switch { display: flex; gap: 8px; margin-bottom: 14px; }
+  .mode-switch button.on { background: var(--ink); color: #fff; border-color: var(--ink); }
+
+  .subform { display: none; }
+  .subform.active { display: block; }
+
+  h3.section-title { font-size: 14px; margin: 0 0 10px; }
+  .explicit-row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
+  .explicit-row input { width: auto; flex: 1; }
 </style>
 </head>
 <body>
 <header>
-  <div>
-    <div class="brand">Riverside <span>General</span> — Data Admin</div>
-    <div class="sub">Doctors · Departments · Hospital Info</div>
+  <div class="top-row">
+    <div>
+      <div class="brand">Riverside <span>General</span> — Data Admin</div>
+      <div class="sub">Doctors · Departments · Schedules · Hospital Info</div>
+    </div>
+    <button id="reloadBtn" class="small">Reload from server</button>
   </div>
-  <button id="reloadBtn" class="small">Reload from server</button>
+  <div class="tabs">
+    <button class="tab active" data-tab="data">Hospital Data</button>
+    <button class="tab" data-tab="schedule">Doctor Schedules</button>
+  </div>
 </header>
 
 <div class="wrap">
-  <div class="banner" id="banner"></div>
-  <p class="hint">
-    Edit hospital information here. Changes take effect on the next call after
-    you save — calls already in progress are not affected. The confirmation
-    code and doctor directory callers hear come from this data.
-  </p>
 
-  <div class="toolbar">
-    <button id="addDoctor" class="small">+ Add doctor</button>
-    <button id="addDepartment" class="small">+ Add department</button>
-    <button id="addInfo" class="small">+ Add info entry</button>
+  <!-- ============================= DATA TAB ============================= -->
+  <div class="panel active" id="panel-data">
+    <div class="banner" id="banner"></div>
+    <p class="hint">
+      Edit hospital information here. Changes take effect on the next call after
+      you save — calls already in progress are not affected. The confirmation
+      code and doctor directory callers hear come from this data.
+    </p>
+
+    <div class="toolbar">
+      <button id="addDoctor" class="small">+ Add doctor</button>
+      <button id="addDepartment" class="small">+ Add department</button>
+      <button id="addInfo" class="small">+ Add info entry</button>
+    </div>
+
+    <div id="entries"></div>
   </div>
 
-  <div id="entries"></div>
+  <!-- =========================== SCHEDULE TAB =========================== -->
+  <div class="panel" id="panel-schedule">
+    <div class="banner" id="schedBanner"></div>
+    <p class="hint">
+      Add, view, and remove appointment timings per doctor. New timings become
+      bookable by callers immediately. A booked slot can't be removed here —
+      cancel the booking first from the phone-call flow.
+    </p>
+
+    <div class="sched-layout">
+      <div>
+        <div class="toolbar" style="margin-bottom:12px">
+          <button id="newDoctorBtn" class="small primary" style="width:100%">+ Add new doctor</button>
+        </div>
+        <div class="doctor-list" id="doctorList"></div>
+      </div>
+
+      <div id="scheduleDetail">
+        <div class="empty">Pick a doctor on the left, or add a new one.</div>
+      </div>
+    </div>
+  </div>
+
 </div>
+
+<!-- New-doctor form (shown inline inside schedule detail area when active) -->
+<template id="tpl-new-doctor">
+  <div class="card">
+    <h3 class="section-title">Add new doctor</h3>
+    <div class="form-grid">
+      <div class="field"><label>Name</label><input id="ndName" placeholder="Dr. Jane Doe" /></div>
+      <div class="field"><label>Department</label><input id="ndDept" placeholder="cardiology" /></div>
+    </div>
+    <div class="field" style="margin-top:10px">
+      <label>Bio (optional — a short line the AI can read to callers)</label>
+      <textarea id="ndBio" placeholder="Leave blank to auto-generate a short placeholder."></textarea>
+    </div>
+    <h3 class="section-title" style="margin-top:16px">Initial weekly schedule (optional)</h3>
+    <p class="hint" style="margin-top:0">You can also skip this and add timings afterward.</p>
+    <div class="weekday-row" id="ndWeekdays"></div>
+    <div class="form-grid">
+      <div class="field"><label>Start time</label><input id="ndStart" type="time" value="09:00" /></div>
+      <div class="field"><label>End time</label><input id="ndEnd" type="time" value="13:00" /></div>
+      <div class="field"><label>Slot length (min)</label><input id="ndSlotMin" type="number" value="30" min="5" step="5" /></div>
+      <div class="field"><label>Weeks ahead</label><input id="ndWeeks" type="number" value="4" min="1" max="12" /></div>
+    </div>
+    <div class="entry-actions" style="margin-top:16px">
+      <button class="danger small" id="ndCancel">Cancel</button>
+      <button class="primary" id="ndSave">Save doctor</button>
+    </div>
+  </div>
+</template>
 
 <div class="savebar">
   <div class="status" id="saveStatus">Loading…</div>
@@ -221,6 +340,7 @@
 
   const KNOWN_CATS = ["doctors", "departments", "hours", "insurance",
     "billing", "prescriptions", "policy", "lab", "location"];
+  const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
   function catClass(cat) {
     return "cat-" + (cat || "").toLowerCase().replace(/\s+/g, "-");
@@ -247,12 +367,12 @@
     el.className = "status" + (kind ? " " + kind : "");
   }
 
-  function showBanner(html, kind) {
-    const b = $("banner");
+  function showBanner(html, kind, target) {
+    const b = target || $("banner");
     b.innerHTML = html;
     b.className = "banner show " + kind;
   }
-  function hideBanner() { $("banner").className = "banner"; }
+  function hideBanner(target) { (target || $("banner")).className = "banner"; }
 
   // Basic-auth is handled by the browser dialog on first request; credentials
   // are then cached by the browser for subsequent calls automatically.
@@ -264,11 +384,23 @@
     if (!res.ok) {
       let detail = `HTTP ${res.status}`;
       try { detail = (await res.json()).detail || detail; } catch (e) {}
-      throw new Error(detail);
+      throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
     }
     return res.json();
   }
 
+  // --------------------------------------------------------------- tabs ---
+  document.querySelectorAll(".tab").forEach(btn => {
+    btn.onclick = () => {
+      document.querySelectorAll(".tab").forEach(b => b.classList.remove("active"));
+      document.querySelectorAll(".panel").forEach(p => p.classList.remove("active"));
+      btn.classList.add("active");
+      $("panel-" + btn.dataset.tab).classList.add("active");
+      if (btn.dataset.tab === "schedule" && !doctorsLoaded) loadDoctors();
+    };
+  });
+
+  // ============================================================= DATA ====
   async function load() {
     setStatus("Loading…");
     try {
@@ -299,7 +431,6 @@
       root.innerHTML = `<div class="empty">No entries yet. Use the buttons above to add one.</div>`;
       return;
     }
-    // group by category, in a stable known order
     const order = KNOWN_CATS.concat(
       categories.filter(c => !KNOWN_CATS.includes(c))
     );
@@ -358,7 +489,6 @@
     return escapeHtml(s).replace(/"/g, "&quot;");
   }
 
-  // Delegated input handling — update working copy as the admin types
   $("entries").addEventListener("input", (ev) => {
     const t = ev.target;
     const i = t.dataset.i, f = t.dataset.f;
@@ -390,7 +520,6 @@
     entries.push({ id, category, title: titlePlaceholder, text: "" });
     render();
     refreshDirtyState();
-    // scroll to and focus the new entry's title
     const inputs = document.querySelectorAll(`input[data-f="title"]`);
     const last = inputs[inputs.length - 1];
     if (last) { last.scrollIntoView({ behavior: "smooth", block: "center" }); last.focus(); last.select(); }
@@ -411,6 +540,8 @@
   $("reloadBtn").onclick = () => {
     if (isDirty() && !confirm("You have unsaved changes. Reload and lose them?")) return;
     load();
+    doctorsLoaded = false;
+    if ($("panel-schedule").classList.contains("active")) loadDoctors();
   };
 
   $("saveBtn").onclick = async () => {
@@ -443,10 +574,290 @@
     }
   };
 
-  // Warn before leaving with unsaved changes
   window.addEventListener("beforeunload", (e) => {
     if (isDirty()) { e.preventDefault(); e.returnValue = ""; }
   });
+
+  // ========================================================= SCHEDULES ====
+  let doctorsLoaded = false;
+  let doctors = [];
+  let activeDoctor = null; // {name, department}
+
+  async function loadDoctors() {
+    $("doctorList").innerHTML = `<div class="empty">Loading…</div>`;
+    try {
+      const data = await api("/api/doctors");
+      doctors = data.doctors;
+      doctorsLoaded = true;
+      renderDoctorList();
+    } catch (e) {
+      $("doctorList").innerHTML = "";
+      showBanner(escapeHtml(e.message), "err", $("schedBanner"));
+    }
+  }
+
+  function renderDoctorList() {
+    const root = $("doctorList");
+    root.innerHTML = "";
+    if (!doctors.length) {
+      root.innerHTML = `<div class="empty">No doctors yet.</div>`;
+      return;
+    }
+    doctors.forEach(d => {
+      const btn = document.createElement("button");
+      const isActive = activeDoctor && activeDoctor.name === d.name;
+      btn.className = "doctor-pick card" + (isActive ? " active" : "");
+      btn.innerHTML = `<span class="name">${escapeHtml(d.name)}</span>
+        <span class="meta">${escapeHtml(d.department || "")} · ${d.upcoming_slots} upcoming</span>`;
+      btn.onclick = () => selectDoctor(d);
+      root.appendChild(btn);
+    });
+  }
+
+  async function selectDoctor(d) {
+    activeDoctor = d;
+    renderDoctorList();
+    await renderScheduleDetail();
+  }
+
+  async function renderScheduleDetail() {
+    const root = $("scheduleDetail");
+    if (!activeDoctor) {
+      root.innerHTML = `<div class="empty">Pick a doctor on the left, or add a new one.</div>`;
+      return;
+    }
+    root.innerHTML = `<div class="empty">Loading slots…</div>`;
+    let slots = [];
+    try {
+      const data = await api(
+        `/api/doctors/slots?department=${encodeURIComponent(activeDoctor.department)}&doctor=${encodeURIComponent(activeDoctor.name)}`
+      );
+      slots = data.slots;
+    } catch (e) {
+      root.innerHTML = "";
+      showBanner(escapeHtml(e.message), "err", $("schedBanner"));
+      return;
+    }
+
+    const byDate = {};
+    slots.forEach(s => { (byDate[s.date] = byDate[s.date] || []).push(s); });
+    const dates = Object.keys(byDate).sort();
+
+    root.innerHTML = `
+      <div class="card">
+        <h3 class="section-title">${escapeHtml(activeDoctor.name)} — ${escapeHtml(activeDoctor.department || "")}</h3>
+        <div class="day-by-day" id="dayByDay">
+          ${dates.length ? "" : '<div class="empty">No timings yet — add some below.</div>'}
+        </div>
+      </div>
+      <div class="card">
+        <h3 class="section-title">Add timings</h3>
+        <div class="mode-switch">
+          <button id="modeExplicit" class="small on">Specific dates</button>
+          <button id="modeRecurring" class="small">Recurring weekly pattern</button>
+        </div>
+
+        <div class="subform active" id="subExplicit">
+          <div id="explicitRows"></div>
+          <button class="small" id="addExplicitRow">+ Add another date/time</button>
+          <div class="entry-actions" style="margin-top:14px">
+            <button class="primary" id="saveExplicit">Add these timings</button>
+          </div>
+        </div>
+
+        <div class="subform" id="subRecurring">
+          <label style="font-size:11px;font-family:'IBM Plex Mono',monospace;text-transform:uppercase;letter-spacing:0.07em;color:var(--ink-soft)">Repeat on</label>
+          <div class="weekday-row" id="recWeekdays"></div>
+          <div class="form-grid" style="margin-top:10px">
+            <div class="field"><label>Start time</label><input id="recStart" type="time" value="09:00" /></div>
+            <div class="field"><label>End time</label><input id="recEnd" type="time" value="13:00" /></div>
+            <div class="field"><label>Slot length (min)</label><input id="recSlotMin" type="number" value="30" min="5" step="5" /></div>
+            <div class="field"><label>Weeks ahead</label><input id="recWeeks" type="number" value="4" min="1" max="12" /></div>
+          </div>
+          <div class="entry-actions" style="margin-top:14px">
+            <button class="primary" id="saveRecurring">Generate timings</button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    const dayRoot = $("dayByDay");
+    dates.forEach(date => {
+      const group = document.createElement("div");
+      group.className = "day-group";
+      group.innerHTML = `<div class="day-label">${date}</div>`;
+      const grid = document.createElement("div");
+      grid.className = "slot-grid";
+      byDate[date].sort((a, b) => a.time.localeCompare(b.time)).forEach(s => {
+        const chip = document.createElement("span");
+        chip.className = "slot-chip" + (s.booked ? " booked" : "");
+        chip.innerHTML = `${s.time}${s.booked ? ` · ${escapeHtml(s.patient_name || "booked")}` : ""} <span class="x" title="Remove">&times;</span>`;
+        chip.querySelector(".x").onclick = () => removeSlot(date, s.time);
+        grid.appendChild(chip);
+      });
+      group.appendChild(grid);
+      dayRoot.appendChild(group);
+    });
+
+    // mode switch
+    $("modeExplicit").onclick = () => {
+      $("modeExplicit").classList.add("on"); $("modeRecurring").classList.remove("on");
+      $("subExplicit").classList.add("active"); $("subRecurring").classList.remove("active");
+    };
+    $("modeRecurring").onclick = () => {
+      $("modeRecurring").classList.add("on"); $("modeExplicit").classList.remove("on");
+      $("subRecurring").classList.add("active"); $("subExplicit").classList.remove("active");
+    };
+
+    // explicit rows
+    function addExplicitRow() {
+      const row = document.createElement("div");
+      row.className = "explicit-row";
+      row.innerHTML = `<input type="date" class="exp-date" /><input type="time" class="exp-time" />
+        <span class="x" title="Remove row">&times;</span>`;
+      row.querySelector(".x").onclick = () => row.remove();
+      $("explicitRows").appendChild(row);
+    }
+    addExplicitRow();
+    $("addExplicitRow").onclick = addExplicitRow;
+
+    $("saveExplicit").onclick = async () => {
+      const slotsToAdd = Array.from(document.querySelectorAll("#explicitRows .explicit-row"))
+        .map(r => ({ date: r.querySelector(".exp-date").value, time: r.querySelector(".exp-time").value }))
+        .filter(s => s.date && s.time);
+      if (!slotsToAdd.length) {
+        showBanner("Fill in at least one date and time.", "warn", $("schedBanner"));
+        return;
+      }
+      try {
+        const res = await api("/api/doctors/slots", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            department: activeDoctor.department, doctor: activeDoctor.name,
+            mode: "explicit", slots: slotsToAdd,
+          }),
+        });
+        showBanner(`Added ${res.added} of ${res.requested} timing(s) (duplicates are skipped automatically).`, "ok", $("schedBanner"));
+        await loadDoctors();
+        await renderScheduleDetail();
+      } catch (e) {
+        showBanner(escapeHtml(e.message), "err", $("schedBanner"));
+      }
+    };
+
+    // recurring weekdays
+    const recWk = $("recWeekdays");
+    WEEKDAYS.forEach((label, idx) => {
+      const b = document.createElement("button");
+      b.className = "small weekday-btn";
+      b.textContent = label;
+      b.type = "button";
+      b.onclick = () => b.classList.toggle("on");
+      recWk.appendChild(b);
+    });
+
+    $("saveRecurring").onclick = async () => {
+      const weekdays = Array.from(recWk.querySelectorAll(".weekday-btn.on")).map(b => WEEKDAYS.indexOf(b.textContent));
+      if (!weekdays.length) {
+        showBanner("Pick at least one day of the week.", "warn", $("schedBanner"));
+        return;
+      }
+      try {
+        const res = await api("/api/doctors/slots", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            department: activeDoctor.department, doctor: activeDoctor.name,
+            mode: "recurring", weekdays,
+            start_time: $("recStart").value, end_time: $("recEnd").value,
+            slot_minutes: +$("recSlotMin").value, weeks: +$("recWeeks").value,
+          }),
+        });
+        showBanner(`Generated ${res.generated}, added ${res.added} new timing(s).`, "ok", $("schedBanner"));
+        await loadDoctors();
+        await renderScheduleDetail();
+      } catch (e) {
+        showBanner(escapeHtml(e.message), "err", $("schedBanner"));
+      }
+    };
+  }
+
+  async function removeSlot(date, time) {
+    if (!confirm(`Remove the ${time} slot on ${date}?`)) return;
+    try {
+      await api("/api/doctors/slots", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ department: activeDoctor.department, doctor: activeDoctor.name, date, time }),
+      });
+      await loadDoctors();
+      await renderScheduleDetail();
+    } catch (e) {
+      showBanner(escapeHtml(e.message), "err", $("schedBanner"));
+    }
+  }
+
+  // --------------------------------------------------------- new doctor ---
+  $("newDoctorBtn").onclick = () => {
+    activeDoctor = null;
+    renderDoctorList();
+    const root = $("scheduleDetail");
+    root.innerHTML = "";
+    root.appendChild($("tpl-new-doctor").content.cloneNode(true));
+
+    const wkRow = $("ndWeekdays");
+    WEEKDAYS.forEach(label => {
+      const b = document.createElement("button");
+      b.className = "small weekday-btn";
+      b.textContent = label;
+      b.type = "button";
+      b.onclick = () => b.classList.toggle("on");
+      wkRow.appendChild(b);
+    });
+
+    $("ndCancel").onclick = () => renderScheduleDetail();
+
+    $("ndSave").onclick = async () => {
+      const name = $("ndName").value.trim();
+      const department = $("ndDept").value.trim();
+      if (!name || !department) {
+        showBanner("Name and department are required.", "warn", $("schedBanner"));
+        return;
+      }
+      const weekdays = Array.from(wkRow.querySelectorAll(".weekday-btn.on")).map(b => WEEKDAYS.indexOf(b.textContent));
+      const payload = { name, department, bio: $("ndBio").value.trim() || null };
+      if (weekdays.length) {
+        Object.assign(payload, {
+          weekdays,
+          start_time: $("ndStart").value,
+          end_time: $("ndEnd").value,
+          slot_minutes: +$("ndSlotMin").value,
+          weeks: +$("ndWeeks").value,
+        });
+      }
+      try {
+        const res = await api("/api/doctors", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        let msg = `Added ${res.doctor}.`;
+        if (res.schedule) msg += ` Generated ${res.schedule.generated}, added ${res.schedule.added} timing(s).`;
+        if (res.warnings && res.warnings.length) {
+          showBanner(`${msg} Warnings:<ul>${res.warnings.map(w => `<li>${escapeHtml(w)}</li>`).join("")}</ul>`, "warn", $("schedBanner"));
+        } else {
+          showBanner(msg, "ok", $("schedBanner"));
+        }
+        await loadDoctors();
+        const added = doctors.find(d => d.name === res.doctor);
+        if (added) await selectDoctor(added);
+        else renderScheduleDetail();
+      } catch (e) {
+        showBanner(escapeHtml(e.message), "err", $("schedBanner"));
+      }
+    };
+  };
 
   load();
 </script>

@@ -72,6 +72,28 @@ does NOT make the schedule keep rolling forward on its own over time -
 that would be a separate "prune old slots / append new ones on a cadence"
 feature, not something a one-time seed can do.
 
+PAST-TIME FILTER (this revision - fixed a real staleness bug, same family
+as the seed-date fix above): _find_slots_sync's query only ever excluded
+slots that were already BOOKED (via the LEFT JOIN ... IS NULL check). It
+never checked whether a slot's TIME had already passed TODAY - so a 9:00
+AM slot for today's date stayed "available" all day long, right up until
+midnight, since nothing ever compared it against the current clock time.
+Confirmed live: asking for availability at 5:43 PM still returned that
+morning's 9:00 AM and 10:30 AM slots as open. Fixed by filtering, in
+Python after the query runs, any row where row.date == today AND
+row.time < now (string comparison on "HH:MM" works correctly here since
+both sides are zero-padded 24-hour). Only today's date needs this check -
+a future date's 9:00 AM slot is correctly still open regardless of what
+time it is right now.
+  IMPORT NAMING NOTE: this function's own parameter is named `date`,
+  which shadows the `date` class imported from the datetime module at
+  the top of this file. `datetime.date` is imported under the alias
+  `date_cls` specifically so this function can call `date_cls.today()`
+  without colliding with its own `date` parameter - calling plain
+  `date.today()` inside this function would instead try (and fail) to
+  call `.today()` on whatever string was passed in as the slot-lookup
+  date argument.
+
 LIVEKIT COMPAT NOTE (this revision - converted from Pipecat):
 The original file took a `params` object as the first argument to every
 public function and spoke results through `params.result_callback(string)`
@@ -99,9 +121,11 @@ filler hook). Both are removed here. Specific changes:
 """
 
 import asyncio
+import os
 import sqlite3
 import uuid
-from datetime import date, datetime, timedelta, timezone
+from datetime import date as date_cls
+from datetime import datetime, timedelta, timezone
 from difflib import get_close_matches
 from pathlib import Path
 from typing import Optional
@@ -121,7 +145,7 @@ def _generate_seed_slots():
     slots table is empty. An existing hospital_bookings.db is untouched;
     delete it (plus its -wal/-shm files) to force a fresh, re-dated seed.
     """
-    today = date.today()
+    today = date_cls.today()
     d0 = str(today)
     d1 = str(today + timedelta(days=1))
     d2 = str(today + timedelta(days=2))
@@ -211,7 +235,9 @@ def _closest_match(name, candidates, cutoff: float = 0.72):
 
 def _find_slots_sync(department, date, limit):
     """Returns None if the department doesn't exist at all, else a list of
-    (doctor, date, time) rows for OPEN slots (already excludes bookings)."""
+    (doctor, date, time) rows for OPEN slots (already excludes bookings
+    AND, for today's date specifically, already-passed times - see the
+    PAST-TIME FILTER note in this file's module docstring)."""
     conn = _get_conn()
     try:
         dept_row = conn.execute(
@@ -236,7 +262,17 @@ def _find_slots_sync(department, date, limit):
         query += " ORDER BY s.date, s.time LIMIT ?"
         params.append(limit)
 
-        return conn.execute(query, params).fetchall()
+        rows = conn.execute(query, params).fetchall()
+
+        # PAST-TIME FILTER: the JOIN above only excludes slots that are
+        # already BOOKED - it says nothing about whether a slot's time has
+        # already passed TODAY. Use date_cls (not the `date` parameter
+        # this function shadows) to get the real current date/time.
+        today_str = str(date_cls.today())
+        now_str = datetime.now().strftime("%H:%M")
+        rows = [r for r in rows if not (r[1] == today_str and r[2] < now_str)]
+
+        return rows
     finally:
         conn.close()
 
@@ -715,217 +751,428 @@ async def update_appointment(
     }
 
 
-if __name__ == "__main__":
-    import os
+# ---------------------------------------------------------------------------
+# ADMIN SCHEDULE MANAGEMENT (this revision - adds the missing "add new doctor
+# timings" surface). Used by admin_server.py's /api/doctors* endpoints only -
+# NOT exposed to the LLM as a function_tool. check_availability/
+# book_appointment/cancel_appointment/update_appointment above remain the
+# only caller-facing surface; these are staff-facing schedule edits.
+# ---------------------------------------------------------------------------
 
-    async def _run():
-        if DB_PATH.exists():
-            os.remove(DB_PATH)
-        for ext in ("-wal", "-shm"):
-            p = Path(str(DB_PATH) + ext)
-            if p.exists():
-                os.remove(p)
-        _init_db()
 
-        # Recompute the same relative dates the fresh seed just used, so the
-        # self-test's assertions (which reference specific dates) line up
-        # with whatever _generate_seed_slots() actually inserted this run.
-        today = date.today()
-        d0 = str(today)
-        d1 = str(today + timedelta(days=1))
-        d2 = str(today + timedelta(days=2))
-        d3 = str(today + timedelta(days=3))
-        past_date = str(today - timedelta(days=365))
+def _list_doctors_sync():
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT department, doctor, COUNT(*) AS total, "
+            "SUM(CASE WHEN date >= ? THEN 1 ELSE 0 END) AS upcoming "
+            "FROM slots GROUP BY department, doctor ORDER BY department, doctor",
+            (str(date_cls.today()),),
+        ).fetchall()
+        return [
+            {
+                "department": d,
+                "doctor": doc,
+                "total_slots": total,
+                "upcoming_slots": upcoming or 0,
+            }
+            for d, doc, total, upcoming in rows
+        ]
+    finally:
+        conn.close()
 
-        results = []
 
-        r1 = await check_availability("cardiology", d0)
-        ok1 = r1["status"] == "ok" and any(
-            s["doctor"] == "Dr. Imran Malik" and s["time"] == "09:00"
-            for s in r1["slots"]
-        )
-        results.append(("check_availability finds known slots", ok1, r1))
+async def list_doctors() -> list:
+    """All (department, doctor) pairs with a slots row, plus slot counts -
+    the schedule side of the roster (hospital_kb.get_doctor_roster() is the
+    bio side; admin_server merges the two for the admin UI)."""
+    return await asyncio.to_thread(_list_doctors_sync)
 
-        r2 = await check_availability("neurology")
-        ok2 = r2["status"] == "not_found" and "cardiology" in r2["message"]
-        results.append(("unknown department handled gracefully", ok2, r2))
 
-        r2b = await check_availability("cardiologyy")
-        ok2b = r2b["status"] == "clarify" and "cardiology" in r2b["message"]
-        results.append(("near-miss department suggests closest match", ok2b, r2b))
+def _list_doctor_slots_sync(department, doctor):
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT s.date, s.time, b.patient_name "
+            "FROM slots s LEFT JOIN bookings b "
+            "ON s.department = b.department AND lower(s.doctor) = lower(b.doctor) "
+            "AND s.date = b.date AND s.time = b.time "
+            "WHERE s.department = ? AND lower(s.doctor) = lower(?) "
+            "ORDER BY s.date, s.time",
+            (department.strip().lower(), doctor),
+        ).fetchall()
+        return [
+            {"date": d, "time": t, "booked": patient is not None, "patient_name": patient}
+            for d, t, patient in rows
+        ]
+    finally:
+        conn.close()
 
-        r2c = await book_appointment(
-            "Someone", "neurology", d0, "09:00", doctor="Dr. Imran Malik"
-        )
-        ok2c = r2c["status"] == "error" and "doctor" not in r2c["message"].lower()
-        results.append(
-            ("booking into invalid department reports THAT, not the doctor", ok2c, r2c)
-        )
 
-        r3 = await book_appointment(
-            "Alice Kim", "cardiology", d0, "09:00", doctor="Dr. Imran Malik"
-        )
-        ok3 = r3["status"] == "booked" and r3["patient_name"] == "Alice Kim"
-        results.append(("booking an open slot succeeds", ok3, r3))
+async def list_doctor_slots(department: str, doctor: str) -> list:
+    """Every slot (open or booked) for one doctor, for the admin schedule
+    view - unlike check_availability(), this deliberately includes booked
+    slots too so staff can see the full picture."""
+    return await asyncio.to_thread(_list_doctor_slots_sync, department, doctor)
 
-        r3b = await book_appointment(
-            "Zoe Kim", "cardiology", d0, "13:00", doctor="dr. ayesha siddiqui"
-        )
-        ok3b = r3b["status"] == "booked"
-        results.append(("booking succeeds despite doctor-name casing drift", ok3b, r3b))
 
-        r4 = await book_appointment(
-            "Bob Lee", "cardiology", d0, "09:00", doctor="Dr. Imran Malik"
-        )
-        ok4 = r4["status"] == "unavailable" and "no longer available" in r4["message"]
-        results.append(("sequential double-booking rejected", ok4, r4))
-
-        r4b = await book_appointment(
-            "Eve Chan", "cardiology", d0, "09:00", doctor="Dr. Imran Malikk"
-        )
-        ok4b = r4b["status"] == "error" and "Imran Malik" in r4b["message"]
-        results.append(("near-miss doctor name suggests closest match", ok4b, r4b))
-
-        r5a, r5b = await asyncio.gather(
-            book_appointment(
-                "Carol Diaz",
-                "cardiology",
-                d1,
-                "11:00",
-                doctor="Dr. Imran Malik",
-            ),
-            book_appointment(
-                "Dave Osei",
-                "cardiology",
-                d1,
-                "11:00",
-                doctor="Dr. Imran Malik",
-            ),
-        )
-        outcomes = {r5a["status"] == "booked", r5b["status"] == "booked"}
-        ok5 = outcomes == {True, False}
-        results.append(
-            (
-                "concurrent double-booking: exactly one wins",
-                ok5,
-                f"r5a={r5a} | r5b={r5b}",
+def _add_slots_sync(department, doctor, slots):
+    """slots: iterable of (date, time) strings. INSERT OR IGNORE so
+    re-adding a slot that already exists is a harmless no-op, not a crash -
+    admins re-submitting a recurring pattern that overlaps existing weeks
+    should not error."""
+    dept_key = department.strip().lower()
+    conn = _get_conn()
+    try:
+        added = 0
+        for d, t in slots:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO slots (department, doctor, date, time) "
+                "VALUES (?,?,?,?)",
+                (dept_key, doctor, d, t),
             )
+            added += cur.rowcount
+        conn.commit()
+        return added
+    finally:
+        conn.close()
+
+
+async def add_doctor_slots(department: str, doctor: str, slots: list) -> dict:
+    """Add explicit (date, time) appointment slots for a doctor - the
+    "add new timings" primitive the admin UI calls directly for one-off
+    slots, and that add_recurring_schedule() below builds on for patterns."""
+    slots = [(d, t) for d, t in slots]
+    added = await asyncio.to_thread(_add_slots_sync, department, doctor, slots)
+    return {"status": "ok", "requested": len(slots), "added": added}
+
+
+def _generate_recurring_slots(start_date, weeks, weekdays, start_time, end_time, slot_minutes):
+    """weekdays: set of int, Mon=0 .. Sun=6. Returns a flat list of
+    (date, time) strings covering `weeks` weeks starting from start_date's
+    week, on each matching weekday, every slot_minutes between start_time
+    and end_time (end_time exclusive, matching how the seed schedule reads
+    - e.g. 09:00-13:00/30min yields 09:00..12:30, not 13:00)."""
+    out = []
+    start_h, start_m = (int(x) for x in start_time.split(":"))
+    end_h, end_m = (int(x) for x in end_time.split(":"))
+    start_minutes = start_h * 60 + start_m
+    end_minutes = end_h * 60 + end_m
+    for week in range(weeks):
+        for day_offset in range(7):
+            day = start_date + timedelta(days=week * 7 + day_offset)
+            if day.weekday() not in weekdays:
+                continue
+            minutes = start_minutes
+            while minutes < end_minutes:
+                out.append((str(day), f"{minutes // 60:02d}:{minutes % 60:02d}"))
+                minutes += slot_minutes
+    return out
+
+
+async def add_recurring_schedule(
+    department: str,
+    doctor: str,
+    weekdays: list,
+    start_time: str,
+    end_time: str,
+    slot_minutes: int = 30,
+    weeks: int = 4,
+    start_date: Optional[str] = None,
+) -> dict:
+    """Generate + add a recurring weekly schedule for a doctor - e.g. every
+    Mon/Wed/Fri 09:00-13:00 in 30-minute slots for the next 4 weeks. This is
+    the main "add new doctor timings" entry point the admin UI's recurring-
+    schedule form calls. weekdays are ints, Mon=0..Sun=6."""
+    anchor = date_cls.fromisoformat(start_date) if start_date else date_cls.today()
+    slots = _generate_recurring_slots(
+        anchor, weeks, set(weekdays), start_time, end_time, slot_minutes
+    )
+    if not slots:
+        return {"status": "error", "message": "No slots generated - check weekdays/time range."}
+    added = await asyncio.to_thread(_add_slots_sync, department, doctor, slots)
+    return {"status": "ok", "generated": len(slots), "added": added}
+
+
+def _remove_slot_sync(department, doctor, date, time):
+    conn = _get_conn()
+    try:
+        booked = conn.execute(
+            "SELECT 1 FROM bookings WHERE department = ? AND lower(doctor) = lower(?) "
+            "AND date = ? AND time = ?",
+            (department.strip().lower(), doctor, date, time),
+        ).fetchone()
+        if booked:
+            return "booked"
+        cur = conn.execute(
+            "DELETE FROM slots WHERE department = ? AND lower(doctor) = lower(?) "
+            "AND date = ? AND time = ?",
+            (department.strip().lower(), doctor, date, time),
         )
+        conn.commit()
+        return "removed" if cur.rowcount else "not_found"
+    finally:
+        conn.close()
 
-        r6 = await check_availability("cardiology", past_date)
-        ok6 = (
-            r6["status"] == "ok"
-            and not r6["slots"]
-            and any(a["doctor"].startswith("Dr.") for a in r6.get("alternatives", []))
-        )
-        results.append(("wrong/empty date offers real alternatives", ok6, r6))
 
-        r7 = await cancel_appointment("Alice Kim")
-        ok7 = r7["status"] == "cancelled" and r7["doctor"] == "Dr. Imran Malik"
-        results.append(("cancel_appointment cancels a real booking", ok7, r7))
-
-        r7b = await check_availability("cardiology", d0)
-        ok7b = any(s["time"] == "09:00" for s in r7b["slots"])
-        results.append(("cancelled slot becomes available again", ok7b, r7b))
-
-        r8 = await cancel_appointment("Nobody Here")
-        ok8 = r8["status"] == "not_found"
-        results.append(("cancel: unknown name reported gracefully", ok8, r8))
-
-        r9 = await cancel_appointment("Alice Kim")
-        ok9 = r9["status"] == "not_found"
-        results.append(
-            ("re-cancelling an already-cancelled booking is graceful", ok9, r9)
-        )
-
-        r10setup = await book_appointment(
-            "Zoe Kim",
-            "general medicine",
-            d0,
-            "08:30",
-            doctor="Dr. Bilal Ahmed",
-        )
-        assert r10setup["status"] == "booked", r10setup
-
-        r10 = await cancel_appointment("Zoe Kim")
-        depts = {m["department"] for m in r10.get("matches", [])}
-        ok10 = r10["status"] == "ambiguous" and depts == {
-            "cardiology",
-            "general medicine",
+async def remove_doctor_slot(department: str, doctor: str, date: str, time: str) -> dict:
+    """Remove a single, not-yet-booked slot. Refuses if a patient already
+    holds that slot (cancel the booking first, via cancel_appointment) -
+    an admin should never be able to silently evict a real patient."""
+    status = await asyncio.to_thread(_remove_slot_sync, department, doctor, date, time)
+    if status == "booked":
+        return {
+            "status": "error",
+            "message": "That slot is already booked by a patient - cancel the booking first.",
         }
-        results.append(
-            ("cancel: ambiguous name lists both and asks to narrow down", ok10, r10)
-        )
+    if status == "not_found":
+        return {"status": "error", "message": "That slot doesn't exist."}
+    return {"status": "ok", "message": "Slot removed."}
 
-        r10b = await cancel_appointment("Zoe Kim", department="general medicine")
-        ok10b = (
-            r10b["status"] == "cancelled" and r10b["department"] == "general medicine"
-        )
-        results.append(
-            ("cancel: department filter disambiguates correctly", ok10b, r10b)
-        )
 
-        r11setup = await book_appointment(
-            "Bob Lee", "cardiology", d0, "14:00", doctor="Dr. Imran Malik"
-        )
-        assert r11setup["status"] == "booked", r11setup
+async def self_test() -> bool:
+    """Rebuild hospital_bookings.db from scratch and run the real-
+    scenario checks below (double-booking, fuzzy matching, reschedule,
+    the past-time filter, etc). NEVER call this against a real
+    deployment's database - see tests/test_booking.py for the pytest
+    wrapper that isolates this in a temp DB."""
+    if DB_PATH.exists():
+        os.remove(DB_PATH)
+    for ext in ("-wal", "-shm"):
+        p = Path(str(DB_PATH) + ext)
+        if p.exists():
+            os.remove(p)
+    _init_db()
 
-        r11 = await update_appointment("Bob Lee", new_date=d1, new_time="15:30")
-        ok11 = (
-            r11["status"] == "updated" and r11["date"] == d1 and r11["time"] == "15:30"
-        )
-        results.append(("update_appointment reschedules to an open slot", ok11, r11))
+    # Recompute the same relative dates the fresh seed just used, so the
+    # self-test's assertions (which reference specific dates) line up
+    # with whatever _generate_seed_slots() actually inserted this run.
+    today = date_cls.today()
+    d0 = str(today)
+    d1 = str(today + timedelta(days=1))
+    d2 = str(today + timedelta(days=2))
+    d3 = str(today + timedelta(days=3))
+    past_date = str(today - timedelta(days=365))
 
-        r12a = await check_availability("cardiology", d0)
-        ok12a = any(s["time"] == "09:00" for s in r12a["slots"])
-        results.append(("reschedule frees the old slot", ok12a, r12a))
+    results = []
 
-        r12b = await book_appointment(
-            "Someone Else",
+    # d2 (not d0) is used for the Alice/Bob booking scenario below so this
+    # self-test is never flaky depending on what time of day it happens to
+    # run - a d0 slot earlier than the current wall-clock time is correctly
+    # excluded by the PAST-TIME FILTER (see this module's docstring), which
+    # would make an assertion pinned to "today, 09:00" fail after 9 AM for
+    # reasons that have nothing to do with a real regression.
+    r1 = await check_availability("cardiology", d2)
+    ok1 = r1["status"] == "ok" and any(
+        s["doctor"] == "Dr. Imran Malik" and s["time"] == "09:30"
+        for s in r1["slots"]
+    )
+    results.append(("check_availability finds known slots", ok1, r1))
+
+    r2 = await check_availability("neurology")
+    ok2 = r2["status"] == "not_found" and "cardiology" in r2["message"]
+    results.append(("unknown department handled gracefully", ok2, r2))
+
+    r2b = await check_availability("cardiologyy")
+    ok2b = r2b["status"] == "clarify" and "cardiology" in r2b["message"]
+    results.append(("near-miss department suggests closest match", ok2b, r2b))
+
+    r2c = await book_appointment(
+        "Someone", "neurology", d0, "09:00", doctor="Dr. Imran Malik"
+    )
+    ok2c = r2c["status"] == "error" and "doctor" not in r2c["message"].lower()
+    results.append(
+        ("booking into invalid department reports THAT, not the doctor", ok2c, r2c)
+    )
+
+    r3 = await book_appointment(
+        "Alice Kim", "cardiology", d2, "09:30", doctor="Dr. Imran Malik"
+    )
+    ok3 = r3["status"] == "booked" and r3["patient_name"] == "Alice Kim"
+    results.append(("booking an open slot succeeds", ok3, r3))
+
+    r3b = await book_appointment(
+        "Zoe Kim", "cardiology", d0, "13:00", doctor="dr. ayesha siddiqui"
+    )
+    ok3b = r3b["status"] == "booked"
+    results.append(("booking succeeds despite doctor-name casing drift", ok3b, r3b))
+
+    r4 = await book_appointment(
+        "Bob Lee", "cardiology", d2, "09:30", doctor="Dr. Imran Malik"
+    )
+    ok4 = r4["status"] == "unavailable" and "no longer available" in r4["message"]
+    results.append(("sequential double-booking rejected", ok4, r4))
+
+    r4b = await book_appointment(
+        "Eve Chan", "cardiology", d0, "09:00", doctor="Dr. Imran Malikk"
+    )
+    ok4b = r4b["status"] == "error" and "Imran Malik" in r4b["message"]
+    results.append(("near-miss doctor name suggests closest match", ok4b, r4b))
+
+    r5a, r5b = await asyncio.gather(
+        book_appointment(
+            "Carol Diaz",
             "cardiology",
             d1,
-            "15:30",
+            "11:00",
             doctor="Dr. Imran Malik",
+        ),
+        book_appointment(
+            "Dave Osei",
+            "cardiology",
+            d1,
+            "11:00",
+            doctor="Dr. Imran Malik",
+        ),
+    )
+    outcomes = {r5a["status"] == "booked", r5b["status"] == "booked"}
+    ok5 = outcomes == {True, False}
+    results.append(
+        (
+            "concurrent double-booking: exactly one wins",
+            ok5,
+            f"r5a={r5a} | r5b={r5b}",
         )
-        ok12b = (
-            r12b["status"] == "unavailable" and "no longer available" in r12b["message"]
+    )
+
+    r6 = await check_availability("cardiology", past_date)
+    ok6 = (
+        r6["status"] == "ok"
+        and not r6["slots"]
+        and any(a["doctor"].startswith("Dr.") for a in r6.get("alternatives", []))
+    )
+    results.append(("wrong/empty date offers real alternatives", ok6, r6))
+
+    r7 = await cancel_appointment("Alice Kim")
+    ok7 = r7["status"] == "cancelled" and r7["doctor"] == "Dr. Imran Malik"
+    results.append(("cancel_appointment cancels a real booking", ok7, r7))
+
+    r7b = await check_availability("cardiology", d2)
+    ok7b = any(s["time"] == "09:30" for s in r7b["slots"])
+    results.append(("cancelled slot becomes available again", ok7b, r7b))
+
+    r8 = await cancel_appointment("Nobody Here")
+    ok8 = r8["status"] == "not_found"
+    results.append(("cancel: unknown name reported gracefully", ok8, r8))
+
+    r9 = await cancel_appointment("Alice Kim")
+    ok9 = r9["status"] == "not_found"
+    results.append(
+        ("re-cancelling an already-cancelled booking is graceful", ok9, r9)
+    )
+
+    r10setup = await book_appointment(
+        "Zoe Kim",
+        "general medicine",
+        d0,
+        "08:30",
+        doctor="Dr. Bilal Ahmed",
+    )
+    assert r10setup["status"] == "booked", r10setup
+
+    r10 = await cancel_appointment("Zoe Kim")
+    depts = {m["department"] for m in r10.get("matches", [])}
+    ok10 = r10["status"] == "ambiguous" and depts == {
+        "cardiology",
+        "general medicine",
+    }
+    results.append(
+        ("cancel: ambiguous name lists both and asks to narrow down", ok10, r10)
+    )
+
+    r10b = await cancel_appointment("Zoe Kim", department="general medicine")
+    ok10b = (
+        r10b["status"] == "cancelled" and r10b["department"] == "general medicine"
+    )
+    results.append(
+        ("cancel: department filter disambiguates correctly", ok10b, r10b)
+    )
+
+    r11setup = await book_appointment(
+        "Bob Lee", "cardiology", d0, "14:00", doctor="Dr. Imran Malik"
+    )
+    assert r11setup["status"] == "booked", r11setup
+
+    r11 = await update_appointment("Bob Lee", new_date=d1, new_time="15:30")
+    ok11 = (
+        r11["status"] == "updated" and r11["date"] == d1 and r11["time"] == "15:30"
+    )
+    results.append(("update_appointment reschedules to an open slot", ok11, r11))
+
+    # Bob Lee's OLD slot before the reschedule above was d0/"14:00" (booked
+    # in r11setup) - NOT "09:00" (a pre-existing copy-paste bug in this
+    # assertion: it happened to still pass whenever the self-test ran
+    # before 9 AM, since d0's untouched "09:00" seed slot is only hidden by
+    # the PAST-TIME FILTER after that time - it was never actually checking
+    # what this test's name says it checks).
+    r12a = await check_availability("cardiology", d0)
+    ok12a = any(s["time"] == "14:00" for s in r12a["slots"])
+    results.append(("reschedule frees the old slot", ok12a, r12a))
+
+    r12b = await book_appointment(
+        "Someone Else",
+        "cardiology",
+        d1,
+        "15:30",
+        doctor="Dr. Imran Malik",
+    )
+    ok12b = (
+        r12b["status"] == "unavailable" and "no longer available" in r12b["message"]
+    )
+    results.append(("reschedule occupies the new slot", ok12b, r12b))
+
+    r13 = await update_appointment("Bob Lee", new_date=d1, new_time="23:59")
+    ok13 = r13["status"] == "unavailable"
+    results.append(
+        ("reschedule to invalid slot rejected with alternatives", ok13, r13)
+    )
+
+    r14 = await update_appointment("Bob Lee", new_date=d1, new_time="15:30")
+    ok14 = r14["status"] == "no_change"
+    results.append(("reschedule to identical slot is a graceful no-op", ok14, r14))
+
+    r14b = await update_appointment("Bob Lee", new_time="15:30")
+    ok14b = r14b["status"] == "no_change"
+    results.append(
+        ("reschedule to same time (date carried over) is a no-op", ok14b, r14b)
+    )
+
+    r15 = await update_appointment("Nobody Here", new_date=d1, new_time="09:00")
+    ok15 = r15["status"] == "not_found"
+    results.append(("update: unknown name reported gracefully", ok15, r15))
+
+    r16 = await book_appointment("Auto Pick", "pediatrics", d1, "09:30")
+    ok16 = r16["status"] == "booked" and r16["doctor"] == "Dr. Sana Farooqi"
+    results.append(
+        ("book_appointment with doctor omitted auto-picks one", ok16, r16)
+    )
+
+    # PAST-TIME FILTER regression test: today's slots that have already
+    # passed the current clock time must NOT show up as available.
+    # This directly encodes the 5:43 PM bug (morning slots wrongly
+    # still offered) so it can never silently regress again.
+    now_str = datetime.now().strftime("%H:%M")
+    r17 = await check_availability("general medicine", d0)
+    past_today_slots = [s for s in r17["slots"] if s["time"] < now_str]
+    ok17 = len(past_today_slots) == 0
+    results.append(
+        (
+            "today's already-passed times are excluded from availability",
+            ok17,
+            f"now={now_str} | slots_returned={r17['slots']}",
         )
-        results.append(("reschedule occupies the new slot", ok12b, r12b))
+    )
 
-        r13 = await update_appointment("Bob Lee", new_date=d1, new_time="23:59")
-        ok13 = r13["status"] == "unavailable"
-        results.append(
-            ("reschedule to invalid slot rejected with alternatives", ok13, r13)
-        )
+    for desc, ok, detail in results:
+        print(f"[{'PASS' if ok else 'FAIL'}] {desc}\n       -> {detail}")
 
-        r14 = await update_appointment("Bob Lee", new_date=d1, new_time="15:30")
-        ok14 = r14["status"] == "no_change"
-        results.append(("reschedule to identical slot is a graceful no-op", ok14, r14))
+    all_ok = all(ok for _, ok, _ in results)
+    print(f"\n{'ALL PASS' if all_ok else 'FAILURES ABOVE'}")
+    if not all_ok:
+        print("DO NOT wire this into the pipeline until all cases pass.")
+    return all_ok
 
-        r14b = await update_appointment("Bob Lee", new_time="15:30")
-        ok14b = r14b["status"] == "no_change"
-        results.append(
-            ("reschedule to same time (date carried over) is a no-op", ok14b, r14b)
-        )
 
-        r15 = await update_appointment("Nobody Here", new_date=d1, new_time="09:00")
-        ok15 = r15["status"] == "not_found"
-        results.append(("update: unknown name reported gracefully", ok15, r15))
-
-        r16 = await book_appointment("Auto Pick", "pediatrics", d1, "09:30")
-        ok16 = r16["status"] == "booked" and r16["doctor"] == "Dr. Sana Farooqi"
-        results.append(
-            ("book_appointment with doctor omitted auto-picks one", ok16, r16)
-        )
-
-        for desc, ok, detail in results:
-            print(f"[{'PASS' if ok else 'FAIL'}] {desc}\n       -> {detail}")
-
-        all_ok = all(ok for _, ok, _ in results)
-        print(f"\n{'ALL PASS' if all_ok else 'FAILURES ABOVE'}")
-        if not all_ok:
-            print("DO NOT wire this into the pipeline until all cases pass.")
-        return all_ok
-
-    passed = asyncio.run(_run())
+if __name__ == "__main__":
+    passed = asyncio.run(self_test())
     exit(0 if passed else 1)

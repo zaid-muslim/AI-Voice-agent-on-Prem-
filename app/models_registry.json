@@ -45,13 +45,22 @@
 
   "stt_backends": [
     {
+      "id": "whisper-shared-distil-large-v3",
+      "engine": "whisper_shared",
+      "model": "distil-large-v3",
+      "display_name": "Whisper distil-large-v3 (shared service, default)",
+      "status": "verified",
+      "license": "MIT",
+      "note": "Same model/plugin logic as the in-process entry below, but served by ONE persistent stt_service/server.py process shared across every worker/room instead of each worker loading its own copy - fixes the 'a new STT per room' GPU-memory blowup under concurrent callers. Falls back to the in-process entry automatically if the shared service is unreachable at worker startup."
+    },
+    {
       "id": "whisper-distil-large-v3",
       "engine": "whisper",
       "model": "distil-large-v3",
-      "display_name": "Whisper distil-large-v3 (proven default)",
+      "display_name": "Whisper distil-large-v3 (in-process, legacy)",
       "status": "verified",
       "license": "MIT",
-      "note": "Proven in real calls this project. Handles Urdu code-switching. Per this project's own measured comparison, the ~500ms fixed endpointing delay dominates end-to-end latency regardless of STT engine - don't expect a dramatically different feel from other STT choices."
+      "note": "Proven in real calls this project. Handles Urdu code-switching. Loads its own model copy PER WORKER PROCESS - use whisper-shared-distil-large-v3 above unless you specifically need a self-contained worker with no external STT dependency."
     },
     {
       "id": "whisper-large-v3",

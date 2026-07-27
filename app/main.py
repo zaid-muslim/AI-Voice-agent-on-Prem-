@@ -1,7 +1,48 @@
+"""
+Riverside General voice receptionist - LiveKit Agents port, SOTA revision.
+
+Architecture (what changed vs the Pipecat version, and what didn't):
+
+  Pipecat                                 LiveKit (this file)
+  ---------------------------------------------------------------------------
+  Pipeline([...]) frame graph          -> AgentSession(vad, stt, llm, tts,
+                                          turn_detection)
+  SafetyGateProcessor (FrameProcessor  -> on_user_turn_completed() hook:
+    swallowing TranscriptionFrame)        runs run_safety_gate() on the final
+                                          transcript, speaks the escalation
+                                          via session.say(), and raises
+                                          StopResponse() so the LLM NEVER
+                                          generates for that turn.
+  faster-whisper STT                   -> Any of 4 STT engines (whisper,
+                                          Parakeet, Canary), chosen via
+                                          system_config.json (edit through
+                                          the dev console at :7871), not
+                                          a fixed env var.
+  tuned VAD stop_secs (0.3, risky)     -> Silero VAD + the semantic turn-
+                                          detector model.
+  register_direct_function(...)        -> @function_tool methods below,
+                                          signatures matching the REAL
+                                          hospital_core/booking.py exactly
+                                          (incl. department/time narrowing
+                                          for ambiguous cancels).
+  tool_filler decorator                -> run_with_filler() inside each tool
+  manual FastAPI signaling server      -> DELETED. livekit-server does all
+                                          signaling; token_server.py only
+                                          mints join tokens + serves the UI.
+  vLLM/RAG/TTS warm-ups at startup     -> prewarm_fnc + entrypoint warm-ups
+
+Run (after README setup):
+    python agent.py dev        # hot-reload dev worker
+    python agent.py console    # terminal mode: local mic/speaker, no server
+    python agent.py start      # production mode
+"""
+
 from __future__ import annotations
 
 import asyncio
 import os
+import socket
+from urllib.parse import urlparse
 
 import aiohttp
 from dotenv import load_dotenv
@@ -50,6 +91,14 @@ PARAKEET_MODEL = os.environ.get("PARAKEET_MODEL", "nvidia/parakeet-tdt-0.6b-v2")
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "distil-large-v3")
 MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "300"))
 
+# Shared faster-whisper STT service (stt_service/server.py) - ONE persistent,
+# GPU-warm process serving every worker/room, instead of each worker process
+# loading its own WhisperModel copy. Same "one shared server" split as
+# QWEN_OMNI_BASE_URL below, just for STT. Defaults to localhost since it
+# typically runs on the same box as the agent (PC1); point it at a dedicated
+# STT box the same way QWEN_OMNI_BASE_URL points at PC2 if you split it out.
+SHARED_STT_BASE_URL = os.environ.get("SHARED_STT_BASE_URL", "http://localhost:8020")
+
 # Qwen3-TTS via vLLM-Omni, running persistently on PC2 (the "TTS box"),
 # NOT on this machine. Every room/session's TTS calls go over the network
 # to this one shared, already-warm server - no per-call subprocess spawn.
@@ -64,6 +113,49 @@ QWEN_OMNI_BASE_URL = os.environ.get(
 
 QWEN_OMNI_VOICE = os.environ.get("QWEN_OMNI_VOICE", "Aiden")
 
+
+def _shared_stt_reachable(base_url: str, timeout: float = 2.0) -> bool:
+    """Same fast TCP-level reachability check as _qwen_omni_reachable
+    below, applied to the shared STT service - run ONCE per worker process
+    in prewarm(), not per call. A real HTTP health check still happens
+    right after via SharedWhisperSTT.load()."""
+    parsed = urlparse(base_url)
+    host = parsed.hostname
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError as exc:
+        logger.warning(
+            f"Shared STT service ({host}:{port}) not reachable ({exc}) - "
+            "this worker process will use in-process faster-whisper instead."
+        )
+        return False
+
+
+def _qwen_omni_reachable(base_url: str, timeout: float = 2.0) -> bool:
+    """Fast TCP-level reachability check for PC2 (the remote Qwen-Omni TTS
+    server), run ONCE per worker process in prewarm() - not per call, since
+    a worker process serves calls sequentially and PC2's up/down state
+    isn't expected to flip mid-process. Deliberately just a socket connect,
+    not a full HTTP request - we only need "is anything listening on that
+    port" before deciding which TTS engine to construct. The real
+    synthesis correctness is still verified afterwards by
+    _warm_up_qwen_omni()'s actual HTTP call."""
+    parsed = urlparse(base_url)
+    host = parsed.hostname
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError as exc:
+        logger.warning(
+            f"PC2 (Qwen-Omni TTS, {host}:{port}) not reachable ({exc}) - "
+            "this worker process will use local Qwen subprocess TTS instead."
+        )
+        return False
+
+
 # SELECTION config: WHICH of the available models/backends is active RIGHT
 # NOW. This comes from system_config.py instead of a fixed env var, so a
 # developer's choice from the dev UI takes effect - see system_config.py's
@@ -73,11 +165,41 @@ QWEN_OMNI_VOICE = os.environ.get("QWEN_OMNI_VOICE", "Aiden")
 
 
 def _make_stt(stt_cfg: dict):
+    """Chosen by stt_cfg = {"engine": ..., "model": ...} from
+    system_config (schema v2 - see that module's docstring for why this
+    changed from a flat backend string).
 
-    engine = stt_cfg.get("engine", "whisper")
+    engine="parakeet" fallback chain, in order:
+      1. PARAKEET_PYTHON is set -> subprocess plugin. This is the path that
+         actually works when the main agent's venv is Python 3.12, since
+         NeMo's ASR extras currently fail to build there (see README) -
+         Parakeet runs isolated in its own 3.10/3.11 venv instead.
+      2. PARAKEET_PYTHON unset but `nemo` importable HERE -> in-process
+         plugin (only works if your main venv itself is 3.10/3.11).
+      3. Neither -> faster-whisper, the proven fallback.
+
+    engine="canary" needs CANARY_PYTHON/CANARY_WORKER (same NeMo venv as
+    Parakeet typically works - see plugins/canary_worker.py). Falls back
+    to whisper if that infra isn't set, same pattern as parakeet.
+
+    engine="whisper" (or anything unrecognized) -> faster-whisper, using
+    stt_cfg["model"] as the specific checkpoint name (e.g.
+    "distil-large-v3" or "large-v3" - same plugin code, different size)."""
+    engine = stt_cfg.get("engine", "whisper_shared")
     model = stt_cfg.get("model", WHISPER_MODEL)
 
-    if engine == "parakeet":
+    if engine == "whisper_shared":
+        if _shared_stt_reachable(SHARED_STT_BASE_URL):
+            from plugins.shared_whisper_stt import SharedWhisperSTT
+
+            logger.info(f"STT: shared faster-whisper service ({SHARED_STT_BASE_URL})")
+            return SharedWhisperSTT(base_url=SHARED_STT_BASE_URL)
+        logger.warning(
+            f"stt engine=whisper_shared but {SHARED_STT_BASE_URL} isn't reachable - "
+            "falling back to in-process faster-whisper for this worker process."
+        )
+
+    elif engine == "parakeet":
         if os.environ.get("PARAKEET_PYTHON"):
             from plugins.parakeet_stt_subprocess import ParakeetSubprocessSTT
 
@@ -116,7 +238,18 @@ def _make_stt(stt_cfg: dict):
 
 
 def _make_tts(tts_cfg: dict):
+    """Chosen by tts_cfg = {"engine": ..., "model": ...} from
+    system_config (schema v2). "model" means different things per engine:
+    Qwen -> speaker name, Chatterbox -> unused (single default voice),
+    Kokoro -> voice pack name, Piper -> .onnx file path.
 
+    Each candidate engine falls back to Qwen (remote) if its required env
+    vars aren't set - same graceful-degradation pattern used throughout
+    this project rather than crashing the call. The "qwen_omni" / "qwen"
+    (default) path is itself preceded by a PC2 reachability check up in
+    entrypoint(), which may rewrite the engine to
+    "qwen_local_subprocess" BEFORE this function ever sees it - see that
+    call site's comment for why."""
     engine = tts_cfg.get("engine", "qwen_omni")
     model = tts_cfg.get("model", "")
 
@@ -166,9 +299,10 @@ def _make_tts(tts_cfg: dict):
 
     elif engine == "qwen_local_subprocess":
         # Old behavior, preserved as an explicit opt-in fallback: spawns a
-        # fresh Qwen TTS subprocess on THIS machine per session. Use this
-        # if PC2 is offline/unreachable and you need something working
-        # immediately without fixing the network path first.
+        # fresh Qwen TTS subprocess on THIS machine per session. Reached
+        # either by explicit system_config choice, or automatically from
+        # entrypoint() when PC2 was found unreachable at this worker's
+        # prewarm time.
         logger.info("TTS: Qwen (LOCAL subprocess, legacy fallback)")
         return QwenSubprocessTTS()
 
@@ -464,7 +598,12 @@ def prewarm(proc: JobProcess) -> None:
     whatever it was warmed with until LiveKit recycles it. Same honest
     cross-process caveat as the hospital-data admin UI, documented there
     for the same underlying reason (this file, admin_server.py, and the
-    dev UI are all separate processes with their own in-memory state)."""
+    dev UI are all separate processes with their own in-memory state).
+
+    PC2 REACHABILITY: also checked once here, ONCE per worker process
+    (not per call - see _qwen_omni_reachable's docstring for why), and
+    the result is stashed in proc.userdata for entrypoint() to read on
+    every call this worker handles."""
     cfg = system_config.get_config()
     proc.userdata["vad"] = silero.VAD.load(
         min_silence_duration=float(os.environ.get("VAD_MIN_SILENCE", "0.4")),
@@ -472,6 +611,9 @@ def prewarm(proc: JobProcess) -> None:
     stt_service = _make_stt(cfg["stt"])
     stt_service.load()
     proc.userdata["stt"] = stt_service
+
+    proc.userdata["qwen_omni_reachable"] = _qwen_omni_reachable(QWEN_OMNI_BASE_URL)
+
     compat.warm_rag()
 
 
@@ -514,7 +656,8 @@ async def _warm_up_qwen_omni() -> None:
     PC2's cold-start cost. Mirrors _warm_up_vllm's shape and its "log
     loudly on non-200, don't just assume success" fix - a wrong
     QWEN_OMNI_BASE_URL or QWEN_OMNI_MODEL should be obvious in the logs,
-    not silently swallowed."""
+    not silently swallowed. Only called when the reachability check in
+    prewarm() already found PC2 up - see entrypoint()."""
     try:
         async with aiohttp.ClientSession() as http:
             async with http.post(
@@ -556,13 +699,32 @@ async def entrypoint(ctx: JobContext) -> None:
     cfg = system_config.get_config()
     served_model_name = cfg["llm"]["served_model_name"]
 
-    tts_service = _make_tts(cfg["tts"])
+    # PC2 REACHABILITY FALLBACK: if this worker process found PC2
+    # unreachable back in prewarm() (checked ONCE per process, not per
+    # call - see _qwen_omni_reachable's docstring), and the configured
+    # engine is the default remote Qwen-Omni path, redirect to the local
+    # subprocess fallback instead of constructing a TTS client that would
+    # only fail later, on the caller's first real turn. Explicit
+    # non-Qwen choices (chatterbox/kokoro/piper) are left alone - PC2
+    # being down is irrelevant to those engines.
+    tts_cfg = dict(cfg["tts"])  # copy - don't mutate the shared config dict
+    if tts_cfg.get("engine", "qwen_omni") in ("qwen_omni", "qwen") and not (
+        ctx.proc.userdata.get("qwen_omni_reachable", True)
+    ):
+        logger.warning(
+            "TTS: PC2 unreachable at this worker's startup - using local "
+            "Qwen subprocess fallback for this call."
+        )
+        tts_cfg["engine"] = "qwen_local_subprocess"
+
+    tts_service = _make_tts(tts_cfg)
 
     # Warm-up strategy differs by TTS path: the remote Qwen-Omni server on
     # PC2 is warmed with a tiny real HTTP request (_warm_up_qwen_omni),
-    # same shape as the vLLM warm-up ping. The old local-subprocess path
-    # still uses its own tts_service.prewarm() method instead, since that
-    # class manages its own subprocess lifecycle.
+    # same shape as the vLLM warm-up ping. The local-subprocess path
+    # (whether explicitly configured or reached via the fallback above)
+    # uses its own tts_service.prewarm() method instead, since that class
+    # manages its own subprocess lifecycle.
     if isinstance(tts_service, QwenSubprocessTTS):
         await asyncio.gather(_warm_up_vllm(served_model_name), tts_service.prewarm())
     else:
@@ -661,8 +823,22 @@ if __name__ == "__main__":
         agents.WorkerOptions(
             entrypoint_fnc=entrypoint,
             prewarm_fnc=prewarm,
-            # 300s gives real headroom for the worst
-            # case
+            # DEFAULT IS 10s. prewarm() chains Silero VAD -> STT (whisper,
+            # in-process Parakeet, or the Parakeet SUBPROCESS which itself
+            # needs ~15-20s to load in its own venv) -> the RAG
+            # sentence-transformers embedder -> the PC2 reachability check
+            # (bounded to ~2s by _qwen_omni_reachable's timeout). On a cold
+            # cache, or under GPU contention from vLLM/Qwen already
+            # running, that chain can exceed even a generous ceiling - and
+            # LiveKit kills the whole process the instant it's exceeded,
+            # sometimes mid-report (a BrokenPipeError from the Parakeet
+            # worker trying to write "ready" to an already-closed parent
+            # pipe is the signature of this exact race). 300s gives real
+            # headroom for the worst case: first-time downloads AND three
+            # GPU processes competing for the same card. Once everything is
+            # warm/cached, prewarm actually finishes in a fraction of this -
+            # the timeout only costs anything on a failure, never on the
+            # happy path.
             initialize_process_timeout=300.0,
         )
     )

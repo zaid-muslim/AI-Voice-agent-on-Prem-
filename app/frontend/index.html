@@ -6,28 +6,46 @@
 <title>Riverside General — Front Desk</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,wght@0,600;1,600&family=Archivo:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
 <style>
 /* ------------------------------------------------------------------------
    RIVERSIDE GENERAL — reception console
-   Design language: hospital wayfinding. Department color strips (like
-   corridor floor lines) are the signature element; the transcript is an
-   operator's call log in mono. Everything else stays quiet.
+   Two registers, on purpose: the hero is a live phone line — dark,
+   cinematic, the sphere standing in for the desk's face, built out of
+   the same conventions as any call screen (caller-id, ring, timer,
+   mute/hang-up). Everything below is hospital paperwork — light,
+   procedural, wayfinding-striped. The colors of the sphere itself are
+   not new: they're the same green/blue already used to mark caller vs.
+   desk turns in the transcript, so the whole app shares one vocabulary.
+   The wayfinding palette also carries down into the availability board,
+   so a booking under Cardiology reads the same red the header already
+   taught you.
 --------------------------------------------------------------------------*/
 :root{
-  --paper:#F4F6F5;
+  --paper:#F1F4F3;
   --card:#FFFFFF;
-  --ink:#17232B;
-  --ink-soft:#5A6B76;
-  --line:#DDE4E3;
-  --desk:#2E5E8C;          /* agent / status accent */
+  --ink:#15212A;
+  --ink-soft:#5B6D77;
+  --line:#DEE5E3;
+  --desk:#2C5D82;          /* agent / status accent */
   --cardio:#C0392F;        /* wayfinding: cardiology */
   --peds:#D9930D;          /* wayfinding: pediatrics */
   --genmed:#1F7A5C;        /* wayfinding: general medicine */
   --alert-bg:#FBEBE9;
-  --radius:10px;
+  --radius:12px;
   --mono:'IBM Plex Mono',ui-monospace,monospace;
   --sans:'Archivo',system-ui,sans-serif;
+  --serif:'Fraunces',ui-serif,serif;
+
+  /* hero stage — the one deliberately different register on the page */
+  --stage-a:#0A121D;
+  --stage-b:#132038;
+  --stage-line: rgba(255,255,255,0.10);
+  --stage-ink: #EAF1F6;
+  --stage-ink-soft: rgba(234,241,246,0.55);
+  --stage-idle:#5E7A93;    /* dim slate — nobody has the floor */
+  --stage-listen:#4FAE86;  /* == --genmed, caller has the floor */
+  --stage-speak:#5B9BD9;   /* == --desk lightened, agent has the floor */
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
@@ -44,56 +62,174 @@ header{background:var(--card);border-bottom:1px solid var(--line)}
 .strip .s-peds{background:var(--peds)}
 .strip .s-desk{background:var(--desk)}
 .masthead{
-  max-width:1100px;margin:0 auto;padding:20px 24px 16px;
-  display:flex;align-items:baseline;justify-content:space-between;gap:16px;flex-wrap:wrap;
+  max-width:1100px;margin:0 auto;padding:18px 24px;
+  display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;
 }
-.masthead h1{font-weight:800;font-size:clamp(20px,3vw,28px);letter-spacing:-.02em}
-.masthead h1 small{display:block;font-weight:500;font-size:12px;letter-spacing:.14em;
-  text-transform:uppercase;color:var(--ink-soft);margin-top:2px}
+.brand{display:flex;align-items:center;gap:13px}
+.crest{
+  width:40px;height:40px;border-radius:11px;flex-shrink:0;
+  background:linear-gradient(135deg,var(--desk),#173247);
+  display:flex;align-items:center;justify-content:center;
+  box-shadow:0 4px 10px -4px rgba(44,93,130,0.55);
+}
+.crest svg{width:21px;height:21px}
+.masthead h1{
+  font-family:var(--serif);font-style:italic;font-weight:600;
+  font-size:clamp(19px,2.6vw,25px);letter-spacing:-.01em;line-height:1.1;
+}
+.masthead h1 small{
+  display:block;font-family:var(--sans);font-style:normal;font-weight:600;
+  font-size:11px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--ink-soft);margin-top:4px;
+}
+.masthead-meta{display:flex;flex-direction:column;align-items:flex-end;gap:5px}
+.hours{font-family:var(--mono);font-size:11px;color:var(--ink-soft)}
 .env-note{font-family:var(--mono);font-size:11px;color:var(--ink-soft)}
-/* ---- layout -------------------------------------------------------------*/
+
+/* ================= HERO — the call screen ================= */
+.hero-wrap{max-width:1100px;margin:0 auto;padding:24px 24px 0}
+.hero{
+  position:relative;overflow:hidden;border-radius:20px;
+  background:radial-gradient(120% 160% at 50% -10%, var(--stage-b), var(--stage-a) 62%);
+  color:var(--stage-ink);
+  padding:38px 24px 30px;
+  display:flex;flex-direction:column;align-items:center;text-align:center;
+  box-shadow:0 24px 48px -24px rgba(10,18,29,0.55);
+}
+.hero::before{ /* faint starfield / grain so the dark field isn't dead flat */
+  content:"";position:absolute;inset:0;pointer-events:none;opacity:.5;
+  background-image:radial-gradient(1px 1px at 20% 30%, rgba(255,255,255,.35) 0, transparent 60%),
+                    radial-gradient(1px 1px at 75% 60%, rgba(255,255,255,.25) 0, transparent 60%),
+                    radial-gradient(1.5px 1.5px at 60% 20%, rgba(255,255,255,.3) 0, transparent 60%),
+                    radial-gradient(1px 1px at 40% 80%, rgba(255,255,255,.2) 0, transparent 60%),
+                    radial-gradient(1.5px 1.5px at 88% 85%, rgba(255,255,255,.25) 0, transparent 60%);
+}
+.caller-id{
+  position:relative;display:flex;align-items:center;gap:8px;
+  font-family:var(--mono);font-size:11.5px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--stage-ink-soft);margin-bottom:26px;
+}
+.caller-id .mark{width:16px;height:16px;border-radius:5px;background:var(--desk);
+  display:inline-flex;align-items:center;justify-content:center;flex-shrink:0}
+.caller-id .mark svg{width:10px;height:10px}
+
+.avatar-stage{
+  position:relative;width:min(78vw,240px);aspect-ratio:1/1;margin-bottom:22px;
+}
+.rings{position:absolute;inset:0;pointer-events:none}
+.rings i{
+  position:absolute;inset:0;margin:auto;border-radius:50%;
+  border:1.5px solid var(--stage-idle);opacity:0;
+}
+.hero[data-phase="idle"] .rings i{animation:ring-breathe 3.6s ease-out infinite}
+.hero[data-phase="connecting"] .rings i{border-color:var(--stage-listen);animation:ring-call 1.3s ease-out infinite}
+.rings i:nth-child(1){animation-delay:0s}
+.rings i:nth-child(2){animation-delay:1.1s}
+.rings i:nth-child(3){animation-delay:2.2s}
+.hero[data-phase="connecting"] .rings i:nth-child(1){animation-delay:0s}
+.hero[data-phase="connecting"] .rings i:nth-child(2){animation-delay:.45s}
+.hero[data-phase="connecting"] .rings i:nth-child(3){animation-delay:.9s}
+@keyframes ring-breathe{
+  0%{width:70%;height:70%;opacity:0}
+  35%{opacity:.35}
+  100%{width:150%;height:150%;opacity:0}
+}
+@keyframes ring-call{
+  0%{width:60%;height:60%;opacity:.55}
+  100%{width:170%;height:170%;opacity:0}
+}
+.avatar-stage canvas{width:100%;height:100%;display:block;position:relative;z-index:1}
+
+.hero-status{
+  display:flex;align-items:center;gap:8px;justify-content:center;
+  font-family:var(--mono);font-size:11.5px;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--stage-ink-soft);margin-bottom:8px;
+}
+.hero-status .dot{width:7px;height:7px;border-radius:50%;background:var(--stage-idle);flex-shrink:0}
+.hero-status.listening .dot{background:var(--stage-listen)}
+.hero-status.speaking .dot{background:var(--stage-speak)}
+.hero-caption{font-size:15px;color:var(--stage-ink);max-width:360px;line-height:1.5;margin-bottom:20px}
+
+.dept-chips{
+  display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-bottom:24px;
+}
+.dept-chip{
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;
+  color:var(--stage-ink-soft);border:1px solid var(--stage-line);border-radius:999px;
+  padding:5px 12px 5px 10px;display:flex;align-items:center;gap:6px;
+}
+.dept-chip::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--dc);flex-shrink:0}
+
+/* -- call controls: idle pill vs. connected call bar -- */
+.call-idle,.call-active{display:flex;align-items:center;gap:14px}
+.call-active{display:none}
+.hero[data-connected="1"] .call-idle{display:none}
+.hero[data-connected="1"] .call-active{display:flex}
+
+#callStartBtn{
+  appearance:none;border:0;cursor:pointer;font:inherit;
+  background:var(--desk);color:#fff;font-weight:700;font-size:15px;
+  padding:14px 26px;border-radius:999px;display:flex;align-items:center;gap:10px;
+  transition:transform .12s ease, background .15s ease, box-shadow .15s ease;
+  box-shadow:0 8px 24px rgba(44,93,130,0.4);
+}
+#callStartBtn:hover{background:#356E98;transform:translateY(-1px);box-shadow:0 10px 28px rgba(44,93,130,0.5)}
+#callStartBtn:focus-visible{outline:3px solid #7fb3e8;outline-offset:3px}
+#callStartBtn:disabled{opacity:.55;cursor:wait;transform:none}
+#callStartBtn svg{width:16px;height:16px}
+
+.call-active .ctrl{
+  appearance:none;cursor:pointer;font:inherit;border-radius:999px;
+  width:52px;height:52px;display:flex;align-items:center;justify-content:center;
+  border:1.5px solid var(--stage-line);background:rgba(255,255,255,0.06);color:var(--stage-ink);
+  transition:background .15s ease, border-color .15s ease;
+}
+.call-active .ctrl:hover{background:rgba(255,255,255,0.12)}
+.call-active .ctrl:focus-visible{outline:3px solid #7fb3e8;outline-offset:2px}
+.call-active .ctrl.active{background:rgba(255,255,255,0.18);border-color:rgba(255,255,255,0.3)}
+.call-active .ctrl svg{width:20px;height:20px}
+.call-active .timer{
+  font-family:var(--mono);font-size:14px;color:var(--stage-ink-soft);min-width:52px;text-align:center;
+}
+.call-active .hangup{background:var(--cardio);border-color:var(--cardio);color:#fff}
+.call-active .hangup:hover{background:#A5332B}
+
+.hero-error{
+  position:relative;margin-top:18px;font-family:var(--mono);font-size:12px;
+  color:#f3a8a1;display:none;
+}
+.hero-error.show{display:block}
+
+@media (prefers-reduced-motion:reduce){
+  .rings i{animation:none !important}
+}
+@media (max-width:560px){
+  .hero{padding:30px 16px 26px}
+  .avatar-stage{width:min(60vw,200px)}
+}
+
+/* ================= body: paperwork below the call ================= */
 main{max-width:1100px;margin:0 auto;padding:24px;display:grid;gap:24px;
   grid-template-columns:minmax(320px,5fr) minmax(320px,6fr)}
 @media (max-width:820px){main{grid-template-columns:1fr}}
 section h2{
+  display:flex;align-items:center;gap:8px;
   font-size:12px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;
   color:var(--ink-soft);margin-bottom:12px;
 }
-/* ---- emergency banner ----------------------------------------------------*/
+section h2 .h2-icon{width:14px;height:14px;flex-shrink:0;opacity:.8}
 #emergency{
-  display:none;grid-column:1/-1;background:var(--alert-bg);
+  display:none;max-width:1100px;margin:20px auto 0;background:var(--alert-bg);
   border:1px solid var(--cardio);border-left:6px solid var(--cardio);
   border-radius:var(--radius);padding:14px 18px;
 }
 #emergency.show{display:block}
 #emergency strong{color:var(--cardio);font-size:13px;letter-spacing:.1em;text-transform:uppercase}
 #emergency p{margin-top:6px;font-size:15px;line-height:1.45}
-/* ---- call console ---------------------------------------------------------*/
+
 .console{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
-  padding:20px;display:flex;flex-direction:column;min-height:520px}
-.call-row{display:flex;align-items:center;gap:16px;margin-bottom:16px}
-#callBtn{
-  appearance:none;border:0;cursor:pointer;font:inherit;
-  background:var(--desk);color:#fff;font-weight:700;font-size:15px;
-  padding:14px 22px;border-radius:999px;display:flex;align-items:center;gap:10px;
-  transition:background .15s;
-}
-#callBtn:hover{background:#264F77}
-#callBtn:focus-visible{outline:3px solid var(--desk);outline-offset:3px}
-#callBtn.on{background:var(--cardio)}
-#callBtn .dot{width:10px;height:10px;border-radius:50%;background:#fff;position:relative}
-#callBtn.on .dot::after{
-  content:"";position:absolute;inset:-6px;border-radius:50%;
-  border:2px solid rgba(255,255,255,.7);animation:pulse 1.6s ease-out infinite;
-}
-@keyframes pulse{from{transform:scale(.6);opacity:1}to{transform:scale(1.5);opacity:0}}
-@media (prefers-reduced-motion:reduce){
-  #callBtn.on .dot::after{animation:none}
-  .chip{animation:none !important}
-}
-#status{font-family:var(--mono);font-size:12px;color:var(--ink-soft)}
-#status b{color:var(--desk);font-weight:500}
-/* ---- transcript: operator call log ---------------------------------------*/
+  padding:20px;display:flex;flex-direction:column;min-height:420px;
+  box-shadow:0 1px 2px rgba(21,33,42,0.04), 0 10px 24px -18px rgba(21,33,42,0.25);}
 #log{
   flex:1;overflow-y:auto;background:#FBFCFC;border:1px solid var(--line);
   border-radius:8px;padding:14px;font-family:var(--mono);font-size:13px;
@@ -106,34 +242,14 @@ section h2{
 .turn.desk   .who{color:var(--desk)}
 .turn.system .who{color:var(--cardio)}
 .turn.pending{opacity:.55}
-/* ---- directory board -------------------------------------------------------*/
-.board{display:flex;flex-direction:column;gap:24px}
-.dept{margin-bottom:4px}
-.dept-head{display:flex;align-items:center;gap:10px;margin-bottom:10px}
-.dept-head .mark{width:22px;height:6px;border-radius:3px}
-.dept-head h3{font-size:15px;font-weight:700;letter-spacing:-.01em}
-.dept-head .count{font-family:var(--mono);font-size:11px;color:var(--ink-soft)}
-.doc{
-  background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
-  padding:14px 16px 14px 20px;margin-bottom:10px;position:relative;cursor:pointer;
-  transition:border-color .15s;
-}
-.doc::before{ /* the wayfinding strip */
-  content:"";position:absolute;left:0;top:0;bottom:0;width:6px;
-  border-radius:var(--radius) 0 0 var(--radius);background:var(--dept-color,var(--desk));
-}
-.doc:hover,.doc:focus-visible{border-color:var(--dept-color,var(--desk));outline:none}
-.doc h4{font-size:15px;font-weight:700}
-.doc p{font-size:13px;color:var(--ink-soft);margin-top:4px;line-height:1.45}
-.doc .ask{
-  margin-top:8px;font-family:var(--mono);font-size:11px;color:var(--dept-color,var(--desk));
-}
-.doc.busy{border-color:var(--dept-color)}
-/* ---- live availability -----------------------------------------------------*/
+
 #availability .card{
   background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
-  padding:14px 16px;margin-bottom:10px;
+  padding:14px 16px;margin-bottom:10px;border-left:4px solid var(--line);
+  box-shadow:0 1px 2px rgba(21,33,42,0.04), 0 10px 24px -18px rgba(21,33,42,0.2);
+  transition:box-shadow .15s ease, transform .15s ease;
 }
+#availability .card:hover{box-shadow:0 14px 28px -16px rgba(21,33,42,0.28);transform:translateY(-1px)}
 #availability .card h4{font-size:14px;font-weight:700}
 #availability .card .meta{font-family:var(--mono);font-size:11px;color:var(--ink-soft);margin-top:2px}
 .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
@@ -144,12 +260,36 @@ section h2{
 }
 .chip.booked{background:var(--genmed);border-color:var(--genmed);color:#fff}
 @keyframes chipin{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.chip{animation:none !important}}
 #availability .empty{
   border:1px dashed var(--line);border-radius:var(--radius);padding:18px;
   font-size:13px;color:var(--ink-soft);
 }
-footer{max-width:1100px;margin:0 auto;padding:8px 24px 28px;
-  font-family:var(--mono);font-size:11px;color:var(--ink-soft)}
+
+/* ================= doctor directory (fed by the "roster" UI event) ==== */
+.directory-wrap{max-width:1100px;margin:0 auto;padding:0 24px 24px}
+.directory{
+  background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+  padding:20px;
+}
+.directory-grid{
+  display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;margin-top:4px;
+}
+.doc-card{
+  border:1px solid var(--line);border-left:4px solid var(--dc,var(--desk));border-radius:10px;
+  padding:12px 14px;background:#FBFCFC;
+}
+.doc-card h4{font-size:14px;font-weight:700}
+.doc-card .dept{font-family:var(--mono);font-size:11px;color:var(--ink-soft);
+  text-transform:uppercase;letter-spacing:.06em;margin:2px 0 8px}
+.doc-card .bio{font-size:12.5px;color:var(--ink-soft);line-height:1.5}
+.directory .empty{border:1px dashed var(--line);border-radius:var(--radius);
+  padding:18px;font-size:13px;color:var(--ink-soft)}
+
+footer{max-width:1100px;margin:0 auto;padding:10px 24px 28px;
+  font-family:var(--mono);font-size:11px;color:var(--ink-soft);
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+footer .sep{opacity:.5}
 </style>
 </head>
 <body>
@@ -160,24 +300,78 @@ footer{max-width:1100px;margin:0 auto;padding:8px 24px 28px;
     <span class="s-peds"></span><span class="s-desk"></span>
   </div>
   <div class="masthead">
-    <h1>Riverside General<small>Front desk · voice reception</small></h1>
-    <div class="env-note" id="envNote">local demo · self-hosted LiveKit</div>
+    <div class="brand">
+      <span class="crest" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#eaf1f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3v6M9 6h6"/>
+          <path d="M3 17c2-2 4-2 6 0s4 2 6 0 4-2 6 0" />
+          <path d="M3 20c2-2 4-2 6 0s4 2 6 0 4-2 6 0" />
+        </svg>
+      </span>
+      <h1>Riverside General<small>Front desk · voice reception</small></h1>
+    </div>
+    <div class="masthead-meta">
+      <div class="hours">Front desk · Mon–Sun 7a–11p</div>
+      <div class="env-note" id="envNote">local demo · self-hosted LiveKit</div>
+    </div>
   </div>
 </header>
 
-<main>
-  <div id="emergency" role="alert">
-    <strong>Emergency protocol engaged</strong>
-    <p id="emergencyMsg"></p>
-  </div>
-
-  <!-- LEFT: the call console -->
-  <section class="console" aria-label="Call console">
-    <h2>Call console</h2>
-    <div class="call-row">
-      <button id="callBtn"><span class="dot" aria-hidden="true"></span><span id="callLabel">Call the front desk</span></button>
-      <div id="status">line idle</div>
+<div class="hero-wrap">
+  <div class="hero" id="hero" data-phase="idle" data-connected="0">
+    <div class="caller-id">
+      <span class="mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#eaf1f6" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V8l9-6 9 6v11a2 2 0 0 1-2 2z"/><path d="M9 21v-8h6v8"/></svg>
+      </span>
+      <span>Riverside General · Front Desk</span>
     </div>
+
+    <div class="avatar-stage">
+      <div class="rings" aria-hidden="true"><i></i><i></i><i></i></div>
+      <canvas id="sphereCanvas"></canvas>
+    </div>
+
+    <div class="hero-status idle" id="sphereState"><span class="dot"></span><span id="sphereStateLabel">Idle</span></div>
+    <div class="hero-caption" id="sphereCaption">Tap to call the front desk. The agent listens, checks the schedule, and can book or cancel appointments live.</div>
+
+    <div class="dept-chips" aria-hidden="true">
+      <span class="dept-chip" style="--dc:var(--cardio)">Cardiology</span>
+      <span class="dept-chip" style="--dc:var(--genmed)">General medicine</span>
+      <span class="dept-chip" style="--dc:var(--peds)">Pediatrics</span>
+    </div>
+
+    <div class="call-idle">
+      <button id="callStartBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+        <span id="callStartLabel">Call the front desk</span>
+      </button>
+    </div>
+
+    <div class="call-active">
+      <button class="ctrl" id="muteBtn" aria-pressed="false" aria-label="Mute microphone">
+        <svg id="muteIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+      </button>
+      <span class="timer" id="callTimer">00:00</span>
+      <button class="ctrl hangup" id="hangupBtn" aria-label="End call">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.68-3.02M2.1 2.1l19.8 19.8M8.09 9.91a19.5 19.5 0 0 1 .71-6.19A2 2 0 0 1 10.79 2h3a2 2 0 0 1 2 1.72c.055.415.135.827.24 1.23"/></svg>
+      </button>
+    </div>
+
+    <div class="hero-error" id="heroError"></div>
+  </div>
+</div>
+
+<div id="emergency" role="alert">
+  <strong>Emergency protocol engaged</strong>
+  <p id="emergencyMsg"></p>
+</div>
+
+<main>
+  <section class="console" aria-label="Call log">
+    <h2>
+      <svg class="h2-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      Call log
+    </h2>
     <div id="log" aria-live="polite">
       <div class="hint">Call log appears here. Try: "I'd like to book a heart
 checkup with cardiology tomorrow morning." Then watch the board on the
@@ -185,48 +379,57 @@ right update as the desk checks the schedule.</div>
     </div>
   </section>
 
-  <!-- RIGHT: directory + live availability -->
-  <div class="board">
-    <section aria-label="Doctor directory">
-      <h2>Directory</h2>
-      <div id="directory"></div>
-    </section>
-    <section id="availability" aria-label="Live availability">
-      <h2>Live availability</h2>
-      <div class="empty" id="availEmpty">When the desk checks the schedule
-        during your call, open slots appear here in real time.</div>
-      <div id="availCards"></div>
-    </section>
-  </div>
+  <section id="availability" aria-label="Live availability">
+    <h2>
+      <svg class="h2-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+      Live availability
+    </h2>
+    <div class="empty" id="availEmpty">When the desk checks the schedule
+      during your call, open slots appear here in real time.</div>
+    <div id="availCards"></div>
+  </section>
 </main>
 
-<footer>agent: whisper → safety gate → gemma 4 (vLLM) → qwen tts · transport: livekit · emergencies bypass the model entirely</footer>
+<div class="directory-wrap">
+  <section class="directory" aria-label="Doctor directory">
+    <h2>
+      <svg class="h2-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      Our doctors
+    </h2>
+    <div class="empty" id="directoryEmpty">The doctor directory loads as soon as the desk joins your call.</div>
+    <div class="directory-grid" id="directoryGrid"></div>
+  </section>
+</div>
+
+<footer>
+  <span>agent: whisper → safety gate → gemma 4 (vLLM) → qwen tts</span>
+  <span class="sep">·</span>
+  <span>transport: livekit</span>
+  <span class="sep">·</span>
+  <span>emergencies bypass the model entirely</span>
+</footer>
 
 <script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
 "use strict";
 /* =========================================================================
    Reception console client.
    - /api/token -> connect to livekit-server -> publish mic, play agent audio
-   - data topic "hospital.ui" -> roster / availability / booking / emergency
+   - data topic "hospital.ui" -> availability / booking / emergency / status
    - transcriptions -> operator call log (new text-stream API, with a
      fallback to the older TranscriptionReceived event)
+   - the agent's remote audio track also drives the 3D voice sphere
    ========================================================================= */
 const LK = window.LivekitClient;
 const $ = (id) => document.getElementById(id);
 
-// Real booking.py returns lowercase department names ("cardiology"),
-// hospital_kb's roster returns Title Case - look up case-insensitively.
-const DEPT_COLORS = {
-  "cardiology": "var(--cardio)",
-  "general medicine": "var(--genmed)",
-  "pediatrics": "var(--peds)",
-};
-const deptColor = (name) => DEPT_COLORS[(name || "").toLowerCase()] || "var(--desk)";
-
+const hero = $("hero");
 let room = null;
 let connected = false;
-const segments = new Map(); // segment id -> log element (for interim updates)
+let muted = false;
+let timerHandle = null;
+const segments = new Map();
 
 /* ------------------------------------------------------------- call log */
 function logTurn(who, text, cls, id, pending) {
@@ -245,46 +448,15 @@ function logTurn(who, text, cls, id, pending) {
   log.scrollTop = log.scrollHeight;
 }
 
-function setStatus(html) { $("status").innerHTML = html; }
-
-/* ------------------------------------------------------------ directory */
-function renderRoster(doctors) {
-  const byDept = {};
-  for (const d of doctors) (byDept[d.department] ??= []).push(d);
-  const root = $("directory");
-  root.innerHTML = "";
-  for (const [dept, docs] of Object.entries(byDept)) {
-    const wrap = document.createElement("div");
-    wrap.className = "dept";
-    const color = deptColor(dept);
-    wrap.innerHTML = `
-      <div class="dept-head">
-        <span class="mark" style="background:${color}"></span>
-        <h3>${dept}</h3>
-        <span class="count">${docs.length} doctor${docs.length > 1 ? "s" : ""}</span>
-      </div>`;
-    for (const doc of docs) {
-      const card = document.createElement("div");
-      card.className = "doc";
-      card.tabIndex = 0;
-      card.dataset.doctor = doc.name;
-      card.style.setProperty("--dept-color", color);
-      card.innerHTML = `
-        <h4>${doc.name}</h4>
-        <p>${doc.bio || ""}</p>
-        <div class="ask">say: "book me with ${doc.name}"</div>`;
-      wrap.appendChild(card);
-    }
-    root.appendChild(wrap);
-  }
+/* ---------------------------------------------- wayfinding department color
+   Ties the availability board back to the header stripe and hero chips,
+   so a Cardiology slot reads the same red everywhere in the app. */
+function deptAccent(dept) {
+  const d = (dept || "").toLowerCase();
+  if (d.includes("cardio")) return "var(--cardio)";
+  if (d.includes("pediat") || d.includes("peds")) return "var(--peds)";
+  return "var(--genmed)";
 }
-// Static fallback so the board is never blank before the agent joins.
-renderRoster([
-  {name:"Dr. Imran Malik", department:"Cardiology", bio:"Consultant cardiologist. Preventive cardiology and hypertension."},
-  {name:"Dr. Ayesha Siddiqui", department:"Cardiology", bio:"Interventional cardiologist. Arrhythmia and pacemaker clinic."},
-  {name:"Dr. Bilal Ahmed", department:"General Medicine", bio:"General physician. Diabetes management and annual checkups."},
-  {name:"Dr. Sana Farooqi", department:"Pediatrics", bio:"Pediatrician. Newborn care, vaccinations, childhood asthma."},
-]);
 
 /* --------------------------------------------------------- availability */
 function renderAvailability(payload) {
@@ -295,6 +467,7 @@ function renderAvailability(payload) {
   groups.forEach((slot, gi) => {
     const card = document.createElement("div");
     card.className = "card";
+    card.style.borderLeftColor = deptAccent(payload.department);
     card.innerHTML = `
       <h4>${slot.doctor}</h4>
       <div class="meta">${payload.department || ""} · ${slot.date || payload.date || ""}${isAlt(gi) ? " · alternative" : ""}</div>
@@ -313,15 +486,50 @@ function renderAvailability(payload) {
       chips.appendChild(chip);
     }
     root.prepend(card);
-    const doc = document.querySelector(`.doc[data-doctor="${slot.doctor}"]`);
-    if (doc) doc.classList.add("busy");
   });
+}
+
+/* --------------------------------------------------------------- roster */
+function renderRoster(doctors) {
+  const grid = $("directoryGrid");
+  const empty = $("directoryEmpty");
+  grid.innerHTML = "";
+  if (!doctors || !doctors.length) { empty.style.display = "block"; return; }
+  empty.style.display = "none";
+
+  const depts = new Set();
+  doctors.forEach((doc) => {
+    depts.add(doc.department || "");
+    const card = document.createElement("div");
+    card.className = "doc-card";
+    card.style.setProperty("--dc", deptAccent(doc.department));
+    card.innerHTML = `
+      <h4>${doc.name || ""}</h4>
+      <div class="dept">${doc.department || ""}</div>
+      <div class="bio">${doc.bio || ""}</div>`;
+    grid.appendChild(card);
+  });
+
+  // Keep the hero's department chips in sync with whatever the desk is
+  // actually staffed for right now, instead of a hardcoded 3-department list.
+  const chipsRoot = document.querySelector(".dept-chips");
+  if (chipsRoot && depts.size) {
+    chipsRoot.innerHTML = "";
+    [...depts].filter(Boolean).sort().forEach((d) => {
+      const chip = document.createElement("span");
+      chip.className = "dept-chip";
+      chip.style.setProperty("--dc", deptAccent(d));
+      chip.textContent = d;
+      chipsRoot.appendChild(chip);
+    });
+  }
 }
 
 function renderBooking(bk) {
   $("availEmpty").style.display = "none";
   const card = document.createElement("div");
   card.className = "card";
+  card.style.borderLeftColor = deptAccent(bk.department);
   card.innerHTML = `
     <h4>Booked — ${bk.doctor || bk.department || ""}</h4>
     <div class="meta">${bk.patient_name || bk.patient || ""} · ${bk.date || ""}${bk.booking_id ? " · code " + bk.booking_id : ""}</div>
@@ -343,14 +551,14 @@ function onUiData(payload) {
       $("emergency").classList.add("show");
       $("emergencyMsg").textContent = msg.message || "Call 1122 immediately.";
       logTurn("SYSTEM", "SAFETY GATE fired — LLM bypassed, escalation spoken directly", "system");
-    } else if (msg.type === "status" && msg.state === "listening")
-      setStatus(`line open · <b>desk is listening</b>`);
+    } else if (msg.type === "status" && msg.state === "listening") {
+      setSphereState("listening", "Line open — go ahead and speak.");
+    }
   } catch (e) { console.warn("bad ui payload", e); }
 }
 
 /* ---------------------------------------------------------- transcription */
 function wireTranscriptions(rm) {
-  // Newer SDKs: transcriptions arrive as text streams on this topic.
   try {
     rm.registerTextStreamHandler("lk.transcription", async (reader, participant) => {
       const isAgent = participant?.identity !== rm.localParticipant.identity;
@@ -364,7 +572,6 @@ function wireTranscriptions(rm) {
     });
   } catch (e) { console.info("text-stream transcription API unavailable, using event fallback"); }
 
-  // Older SDKs: TranscriptionReceived event with segment objects.
   rm.on(LK.RoomEvent.TranscriptionReceived, (segs, participant) => {
     const isAgent = participant?.identity !== rm.localParticipant.identity;
     for (const s of segs || []) {
@@ -374,65 +581,302 @@ function wireTranscriptions(rm) {
   });
 }
 
+/* ------------------------------------------------------------- call timer */
+function startTimer() {
+  const start = Date.now();
+  $("callTimer").textContent = "00:00";
+  timerHandle = setInterval(() => {
+    const s = Math.floor((Date.now() - start) / 1000);
+    const mm = String(Math.floor(s / 60)).padStart(2, "0");
+    const ss = String(s % 60).padStart(2, "0");
+    $("callTimer").textContent = `${mm}:${ss}`;
+  }, 1000);
+}
+function stopTimer() {
+  clearInterval(timerHandle);
+  timerHandle = null;
+}
+
+function showHeroError(msg) {
+  const el = $("heroError");
+  if (!msg) { el.classList.remove("show"); el.textContent = ""; return; }
+  el.textContent = msg;
+  el.classList.add("show");
+}
+
 /* ---------------------------------------------------------------- connect */
 async function connect() {
-  setStatus("requesting line…");
-  const res = await fetch("/api/token");
-  const { token, url, room: roomName } = await res.json();
+  showHeroError(null);
+  hero.dataset.phase = "connecting";
+  setSphereState("listening", "Calling the front desk…");
+  $("callStartBtn").disabled = true;
+  $("callStartLabel").textContent = "Calling…";
 
-  room = new LK.Room({ adaptiveStream: true });
-  wireTranscriptions(room);
+  try {
+    const res = await fetch("/api/token");
+    const { token, url, room: roomName } = await res.json();
 
-  room.on(LK.RoomEvent.TrackSubscribed, (track) => {
-    if (track.kind === LK.Track.Kind.Audio) {
-      const el = track.attach();
-      document.body.appendChild(el);
-    }
-  });
-  room.on(LK.RoomEvent.DataReceived, (payload, _p, _k, topic) => {
-    if (topic === "hospital.ui") onUiData(payload);
-  });
-  room.on(LK.RoomEvent.Disconnected, () => teardown("line idle"));
+    room = new LK.Room({ adaptiveStream: true });
+    wireTranscriptions(room);
 
-  await room.connect(url, token);
-  await room.localParticipant.setMicrophoneEnabled(true);
+    room.on(LK.RoomEvent.TrackSubscribed, (track) => {
+      if (track.kind === LK.Track.Kind.Audio) {
+        const el = track.attach();
+        document.body.appendChild(el);
+        connectSphereToTrack(track.mediaStreamTrack);
+      }
+    });
+    room.on(LK.RoomEvent.DataReceived, (payload, _p, _k, topic) => {
+      if (topic === "hospital.ui") onUiData(payload);
+    });
+    room.on(LK.RoomEvent.Disconnected, () => teardown());
 
-  connected = true;
-  $("callBtn").classList.add("on");
-  $("callLabel").textContent = "End call";
-  setStatus(`connected · room <b>${roomName}</b> · waiting for the desk…`);
-  logTurn("SYSTEM", "line connected — the front desk will greet you", "system");
-}
+    await room.connect(url, token);
+    await room.localParticipant.setMicrophoneEnabled(true);
 
-function teardown(statusText) {
-  connected = false;
-  $("callBtn").classList.remove("on");
-  $("callLabel").textContent = "Call the front desk";
-  setStatus(statusText);
-}
-
-$("callBtn").addEventListener("click", async () => {
-  if (!connected) {
-    try { await connect(); }
-    catch (e) {
-      console.error(e);
-      // Surface the REAL error, not a generic guess - e.name/e.message
-      // usually says exactly what failed (NotAllowedError = mic blocked,
-      // a WebSocket/connection error = livekit-server unreachable, etc.)
-      const detail = e?.name ? `${e.name}: ${e.message || ""}` : String(e);
-      setStatus(`could not connect — ${detail}`);
-    }
-  } else {
-    await room?.disconnect();
-    teardown("call ended");
+    connected = true;
+    muted = false;
+    hero.dataset.phase = "connected";
+    hero.dataset.connected = "1";
+    startTimer();
+    setSphereState("listening", "Connected — the desk will greet you.");
+    logTurn("SYSTEM", `line connected — room ${roomName}`, "system");
+  } catch (e) {
+    console.error(e);
+    const detail = e?.name ? `${e.name}: ${e.message || ""}` : String(e);
+    showHeroError(`Could not connect — ${detail}`);
+    hero.dataset.phase = "idle";
+    setSphereState("idle", "Tap to call the front desk. The agent listens, checks the schedule, and can book or cancel appointments live.");
+  } finally {
+    $("callStartBtn").disabled = false;
+    $("callStartLabel").textContent = "Call the front desk";
   }
+}
+
+function teardown() {
+  connected = false;
+  hero.dataset.phase = "idle";
+  hero.dataset.connected = "0";
+  stopTimer();
+  setSphereState("idle", "Call ended. Tap to call the front desk again.");
+  disconnectSphereAudio();
+}
+
+$("callStartBtn").addEventListener("click", connect);
+$("hangupBtn").addEventListener("click", async () => { await room?.disconnect(); teardown(); });
+$("muteBtn").addEventListener("click", async () => {
+  if (!room) return;
+  muted = !muted;
+  await room.localParticipant.setMicrophoneEnabled(!muted);
+  $("muteBtn").classList.toggle("active", muted);
+  $("muteBtn").setAttribute("aria-pressed", String(muted));
+  $("muteIcon").innerHTML = muted
+    ? '<path d="M1 1l22 22"/><path d="M9 9v3a3 3 0 0 0 4.6 2.55M15 9.34V4a3 3 0 0 0-5.94-.6"/><path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>'
+    : '<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>';
 });
 
-// Secure-context reminder (same caveat as the old build, surfaced in-UI).
 if (!window.isSecureContext && !["localhost","127.0.0.1"].includes(location.hostname)) {
   $("envNote").textContent = "mic blocked: open via localhost/https, or allow this origin in chrome://flags";
   $("envNote").style.color = "var(--cardio)";
 }
+
+/* =========================================================================
+   3D voice sphere — the desk's "face". Reacts to the agent's live audio
+   track when connected; breathes gently on its own when idle.
+   ========================================================================= */
+const sphereStateEl = $("sphereState");
+const sphereStateLabel = $("sphereStateLabel");
+const sphereCaption = $("sphereCaption");
+
+const stage = document.querySelector(".avatar-stage");
+const sphereRenderer = new THREE.WebGLRenderer({ canvas: $("sphereCanvas"), antialias: true, alpha: true });
+const sphereScene = new THREE.Scene();
+const sphereCamera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+sphereCamera.position.set(0, 0, 6.2);
+
+function sizeSphereRenderer() {
+  const w = stage.clientWidth, h = stage.clientHeight;
+  if (!w || !h) return;
+  sphereRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  sphereRenderer.setSize(w, h, false);
+  sphereCamera.aspect = w / h;
+  sphereCamera.updateProjectionMatrix();
+}
+new ResizeObserver(sizeSphereRenderer).observe(stage);
+
+const sphereVertexShader = `
+  uniform float uTime, uAmp, uFreq, uSpeed;
+  varying vec3 vNormal;
+  varying float vDisp;
+  vec3 mod289(vec3 x){return x - floor(x * (1.0/289.0)) * 289.0;}
+  vec4 mod289(vec4 x){return x - floor(x * (1.0/289.0)) * 289.0;}
+  vec4 permute(vec4 x){return mod289(((x*34.0)+1.0)*x);}
+  vec4 taylorInvSqrt(vec4 r){return 1.79284291400159 - 0.85373472095314 * r;}
+  float pnoise(vec3 v){
+    const vec2 C = vec2(1.0/6.0, 1.0/3.0);
+    const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
+    vec3 i  = floor(v + dot(v, C.yyy));
+    vec3 x0 = v - i + dot(i, C.xxx);
+    vec3 g = step(x0.yzx, x0.xyz);
+    vec3 l = 1.0 - g;
+    vec3 i1 = min(g.xyz, l.zxy);
+    vec3 i2 = max(g.xyz, l.zxy);
+    vec3 x1 = x0 - i1 + C.xxx;
+    vec3 x2 = x0 - i2 + C.yyy;
+    vec3 x3 = x0 - D.yyy;
+    i = mod289(i);
+    vec4 p = permute(permute(permute(
+              i.z + vec4(0.0, i1.z, i2.z, 1.0))
+            + i.y + vec4(0.0, i1.y, i2.y, 1.0))
+            + i.x + vec4(0.0, i1.x, i2.x, 1.0));
+    float n_ = 0.142857142857;
+    vec3 ns = n_ * D.wyz - D.xzx;
+    vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+    vec4 x_ = floor(j * ns.z);
+    vec4 y_ = floor(j - 7.0 * x_);
+    vec4 x = x_ *ns.x + ns.yyyy;
+    vec4 y = y_ *ns.x + ns.yyyy;
+    vec4 h = 1.0 - abs(x) - abs(y);
+    vec4 b0 = vec4(x.xy, y.xy);
+    vec4 b1 = vec4(x.zw, y.zw);
+    vec4 s0 = floor(b0)*2.0 + 1.0;
+    vec4 s1 = floor(b1)*2.0 + 1.0;
+    vec4 sh = -step(h, vec4(0.0));
+    vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy;
+    vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww;
+    vec3 p0 = vec3(a0.xy, h.x);
+    vec3 p1 = vec3(a0.zw, h.y);
+    vec3 p2 = vec3(a1.xy, h.z);
+    vec3 p3 = vec3(a1.zw, h.w);
+    vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2,p2), dot(p3,p3)));
+    p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
+    vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+    m = m * m;
+    return 42.0 * dot(m*m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
+  }
+  void main(){
+    vNormal = normal;
+    float n = pnoise(position * uFreq + vec3(uTime * uSpeed));
+    float disp = n * uAmp;
+    vDisp = disp;
+    vec3 newPos = position + normal * disp;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(newPos, 1.0);
+  }
+`;
+const sphereFragmentShader = `
+  uniform vec3 uColorA, uColorB;
+  varying vec3 vNormal;
+  varying float vDisp;
+  void main(){
+    float fresnel = pow(1.0 - abs(dot(normalize(vNormal), vec3(0.0,0.0,1.0))), 2.2);
+    vec3 base = mix(uColorA, uColorB, clamp(vDisp * 2.0 + 0.5, 0.0, 1.0));
+    vec3 color = base + fresnel * 0.9;
+    gl_FragColor = vec4(color, 1.0);
+  }
+`;
+const sphereUniforms = {
+  uTime:   { value: 0 },
+  uAmp:    { value: 0.10 },
+  uFreq:   { value: 1.3 },
+  uSpeed:  { value: 0.10 },
+  uColorA: { value: new THREE.Color("#16283f") },
+  uColorB: { value: new THREE.Color("#5e7a93") },
+};
+const sphereGeo = new THREE.IcosahedronGeometry(1.6, 48);
+const sphereMat = new THREE.ShaderMaterial({ vertexShader: sphereVertexShader, fragmentShader: sphereFragmentShader, uniforms: sphereUniforms });
+const sphereMesh = new THREE.Mesh(sphereGeo, sphereMat);
+sphereScene.add(sphereMesh);
+const sphereGlow = new THREE.Mesh(
+  new THREE.IcosahedronGeometry(1.9, 24),
+  new THREE.MeshBasicMaterial({ color: 0x5b9bd9, transparent: true, opacity: 0.06, side: THREE.BackSide })
+);
+sphereScene.add(sphereGlow);
+
+// idle/listening/speaking targets share the app's existing color vocabulary:
+// slate = nobody has the floor, green = caller (matches transcript), blue = desk
+const sphereTargets = {
+  idle:      { amp: 0.10, freq: 1.3, speed: 0.10, color: "#5e7a93" },
+  listening: { amp: 0.16, freq: 1.7, speed: 0.30, color: "#4fae86" },
+  speaking:  { amp: 0.5,  freq: 2.3, speed: 0.85, color: "#7fb3e8" },
+};
+let sphereCurrent = { amp: 0.10, freq: 1.3, speed: 0.10 };
+let sphereTargetColor = new THREE.Color("#5e7a93");
+let currentPhase = "idle";
+let sphereSmoothedVolume = 0;
+
+function setSphereState(phase, caption) {
+  currentPhase = phase;
+  sphereStateEl.className = "hero-status " + phase;
+  sphereStateLabel.textContent = phase.charAt(0).toUpperCase() + phase.slice(1);
+  if (caption) sphereCaption.textContent = caption;
+  sphereTargetColor.set(sphereTargets[phase].color);
+}
+setSphereState("idle");
+
+let sphereAudioCtx = null, sphereAnalyser = null, sphereDataArr = null;
+function connectSphereToTrack(mediaStreamTrack) {
+  disconnectSphereAudio();
+  try {
+    sphereAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const stream = new MediaStream([mediaStreamTrack]);
+    const src = sphereAudioCtx.createMediaStreamSource(stream);
+    sphereAnalyser = sphereAudioCtx.createAnalyser();
+    sphereAnalyser.fftSize = 512;
+    sphereAnalyser.smoothingTimeConstant = 0.8;
+    src.connect(sphereAnalyser);
+    sphereDataArr = new Uint8Array(sphereAnalyser.frequencyBinCount);
+  } catch (e) { console.warn("could not analyze agent audio", e); }
+}
+function disconnectSphereAudio() {
+  if (sphereAudioCtx) sphereAudioCtx.close();
+  sphereAudioCtx = null; sphereAnalyser = null; sphereDataArr = null;
+}
+function getSphereVolume() {
+  if (!sphereAnalyser) return 0;
+  sphereAnalyser.getByteFrequencyData(sphereDataArr);
+  let sum = 0;
+  for (let i = 0; i < sphereDataArr.length; i++) sum += sphereDataArr[i];
+  return (sum / sphereDataArr.length) / 255;
+}
+
+const sphereClock = new THREE.Clock();
+function animateSphere() {
+  requestAnimationFrame(animateSphere);
+  const t = sphereClock.getElapsedTime();
+
+  if (sphereAnalyser) {
+    const vol = getSphereVolume();
+    sphereSmoothedVolume += (vol - sphereSmoothedVolume) * 0.15;
+    if (sphereSmoothedVolume > 0.05 && connected) {
+      if (currentPhase !== "speaking") setSphereState("speaking", "The desk is speaking.");
+    } else if (connected && currentPhase === "speaking") {
+      setSphereState("listening", "Line open — go ahead and speak.");
+    }
+  } else {
+    sphereSmoothedVolume += (0 - sphereSmoothedVolume) * 0.1;
+  }
+
+  const tgt = sphereTargets[currentPhase];
+  const volBoost = currentPhase === "speaking" ? sphereSmoothedVolume * 1.3 : 0;
+  sphereCurrent.amp   += ((tgt.amp + volBoost) - sphereCurrent.amp) * 0.08;
+  sphereCurrent.freq  += (tgt.freq - sphereCurrent.freq) * 0.06;
+  sphereCurrent.speed += (tgt.speed - sphereCurrent.speed) * 0.06;
+
+  sphereUniforms.uTime.value = t;
+  sphereUniforms.uAmp.value = sphereCurrent.amp;
+  sphereUniforms.uFreq.value = sphereCurrent.freq;
+  sphereUniforms.uSpeed.value = sphereCurrent.speed;
+  sphereUniforms.uColorB.value.lerp(sphereTargetColor, 0.05);
+
+  sphereMesh.rotation.y = t * 0.08;
+  sphereMesh.rotation.x = Math.sin(t * 0.05) * 0.1;
+  const pulse = 1 + Math.sin(t * (currentPhase === "speaking" ? 4 : 1)) * (currentPhase === "speaking" ? 0.02 : 0.01);
+  sphereMesh.scale.setScalar(pulse);
+
+  sphereRenderer.render(sphereScene, sphereCamera);
+}
+sizeSphereRenderer();
+animateSphere();
 </script>
 </body>
 </html>
