@@ -715,6 +715,9 @@
       row.className = "explicit-row";
       row.innerHTML = `<input type="date" class="exp-date" /><input type="time" class="exp-time" />
         <span class="x" title="Remove row">&times;</span>`;
+      const _today = new Date();
+      const _todayStr = `${_today.getFullYear()}-${String(_today.getMonth() + 1).padStart(2, "0")}-${String(_today.getDate()).padStart(2, "0")}`;
+      row.querySelector(".exp-date").min = _todayStr;
       row.querySelector(".x").onclick = () => row.remove();
       $("explicitRows").appendChild(row);
     }

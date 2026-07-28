@@ -50,10 +50,12 @@ from pathlib import Path
 import re
 from typing import Optional
 
+from datetime import date as _date
+
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 # Make hospital_core importable (same trick compat.py uses).
 _CORE_DIR = Path(__file__).parent / "hospital_core"
@@ -123,9 +125,27 @@ class DoctorCreate(BaseModel):
     weeks: int = 4
 
 
+def _reject_past_date(value: Optional[str]) -> Optional[str]:
+    """Shared field_validator body: reject a YYYY-MM-DD date string that's
+    already in the past. Lets a bad date fail fast as a 422 at the API
+    boundary instead of silently becoming an un-bookable, never-cleaned-up
+    row in the slots table."""
+    if value is None:
+        return value
+    try:
+        parsed = _date.fromisoformat(value)
+    except ValueError:
+        raise ValueError(f"'{value}' isn't a valid YYYY-MM-DD date")
+    if parsed < _date.today():
+        raise ValueError(f"'{value}' is in the past - use today or a future date")
+    return value
+
+
 class SlotEntry(BaseModel):
     date: str
     time: str
+
+    _check_date = field_validator("date")(_reject_past_date)
 
 
 class SlotsAddPayload(BaseModel):
@@ -139,6 +159,8 @@ class SlotsAddPayload(BaseModel):
     slot_minutes: int = 30
     weeks: int = 4
     start_date: Optional[str] = None
+
+    _check_start_date = field_validator("start_date")(_reject_past_date)
 
 
 class SlotRemove(BaseModel):
