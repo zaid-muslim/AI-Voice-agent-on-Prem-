@@ -1,5 +1,5 @@
 """
-Two cross-cutting helpers:
+Three cross-cutting helpers:
 
 1. run_with_filler() - the LiveKit-native port of tool_filler.py's
    @with_adaptive_filler. Same semantics: race the tool against a timeout,
@@ -11,12 +11,23 @@ Two cross-cutting helpers:
    directory and availability chips in frontend/index.html live: when the
    agent checks availability, the caller SEES the slots appear as the agent
    says them.
+
+3. require_real_livekit_credentials() - fail-closed startup guard shared by
+   main.py (the agent worker) and token_server.py (the join-token minter).
+   LiveKit's own `--dev` mode auto-provisions the well-known "devkey"/
+   "secret" pair - convenient for a laptop demo, but if a real deployment
+   forgets to override them, the token server keeps minting (and
+   livekit-server keeps accepting) tokens signed with publicly-documented
+   credentials. Call this once at import time in anything that mints or
+   relies on a token so a misconfigured deployment fails at startup, not
+   silently in production.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 from typing import Any, Awaitable
 
 from loguru import logger
@@ -24,6 +35,34 @@ from loguru import logger
 from livekit.agents import get_job_context
 
 UI_TOPIC = "hospital.ui"
+
+_INSECURE_DEFAULTS = {"devkey": "secret"}
+
+
+def require_real_livekit_credentials() -> tuple[str, str]:
+    """Read LIVEKIT_API_KEY/LIVEKIT_API_SECRET from the environment and
+    raise RuntimeError if either is unset or still matches LiveKit's
+    well-known --dev default pair. Returns (key, secret) so callers don't
+    need a second os.environ.get() round-trip."""
+    key = os.environ.get("LIVEKIT_API_KEY")
+    secret = os.environ.get("LIVEKIT_API_SECRET")
+    if not key or not secret:
+        raise RuntimeError(
+            "LIVEKIT_API_KEY / LIVEKIT_API_SECRET are not set. Generate a "
+            "real pair (`docker run --rm livekit/livekit-server "
+            "generate-keys`, or `livekit-server generate-keys` bare-metal) "
+            "and set both in app/.env - see the README's Deployment section."
+        )
+    if _INSECURE_DEFAULTS.get(key) == secret:
+        raise RuntimeError(
+            "LIVEKIT_API_KEY/LIVEKIT_API_SECRET are still LiveKit's "
+            "well-known --dev default ('devkey'/'secret') - anyone who "
+            "knows this public pair can mint their own room-join tokens "
+            "against this deployment. Generate a real pair (`livekit-server "
+            "generate-keys`) and set it in app/.env before running for "
+            "real. (Fine to keep for a throwaway local demo ONLY.)"
+        )
+    return key, secret
 
 # Speak a filler only if the tool hasn't returned within this window.
 # Your Pipecat timing self-test proved this pattern: fast tool -> no filler;

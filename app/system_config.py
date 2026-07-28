@@ -50,10 +50,15 @@ from typing import Any
 
 _CONFIG_FILE = Path(__file__).parent / "system_config.json"
 
+# Repo root, computed rather than hardcoded, so the default config below is
+# correct on any machine/user right after a fresh clone - not just the one
+# it was originally written on.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
 _DEFAULT_CONFIG: dict[str, Any] = {
     "llm": {
         "served_model_name": "gemma-4-12b",
-        "source": "/home/nauyan/voice-agent-pipeline/models/gemma-4-12b-w4a16",
+        "source": str(_REPO_ROOT / "models" / "gemma-4-12b-w4a16"),
         "display_name": "Gemma 4 12B (w4a16)",
     },
     "stt": {
@@ -68,7 +73,7 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     },
 }
 
-_VALID_TTS_ENGINES = {"qwen", "chatterbox", "kokoro", "piper"}
+_VALID_TTS_ENGINES = {"qwen", "qwen_shared", "chatterbox", "kokoro", "piper"}
 _VALID_STT_ENGINES = {"whisper_shared", "whisper", "parakeet", "canary"}
 
 

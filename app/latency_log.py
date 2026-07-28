@@ -49,6 +49,14 @@ from typing import Any
 
 _LOG_FILE = Path(__file__).parent / "latency_log.jsonl"
 
+# Simple size-based rotation: once the log exceeds this, the current file
+# becomes the single ".1" backup before the new line is appended. Latency
+# records are a few hundred bytes each, so 20MB is tens of thousands of
+# turns - plenty for the dev console's comparisons while capping how much
+# disk a long-running production deployment loses to a log nobody rotates
+# otherwise (see the module docstring's original honest note on this).
+_MAX_LOG_BYTES = 20 * 1024 * 1024
+
 # Only these metric TYPES are recorded - matches exactly what agent.py's
 # metrics_collected handler already sees from LiveKit's own EOU/LLM/TTS
 # metrics events (see agent.py entrypoint()'s _on_metrics for the mapping).
@@ -89,10 +97,25 @@ def record(combo: dict, metrics_fields: dict[str, float]) -> None:
             if field in metrics_fields:
                 record_obj[field] = metrics_fields[field]
 
+        _rotate_if_oversized()
         with open(_LOG_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps(record_obj) + "\n")
     except Exception:  # noqa: BLE001
         pass  # diagnostic logging must never break a real call
+
+
+def _rotate_if_oversized() -> None:
+    """Renames latency_log.jsonl -> latency_log.jsonl.1 (overwriting any
+    previous backup) once the live file crosses _MAX_LOG_BYTES. Checked
+    right before each append rather than on a timer - this file is only
+    ever written from here, so a size check at write time is sufficient
+    and avoids a background task for something this low-stakes."""
+    try:
+        if _LOG_FILE.exists() and _LOG_FILE.stat().st_size >= _MAX_LOG_BYTES:
+            backup = _LOG_FILE.with_suffix(_LOG_FILE.suffix + ".1")
+            _LOG_FILE.replace(backup)
+    except OSError:
+        pass  # rotation failing must not block logging or break a real call
 
 
 def _read_all() -> list[dict]:
@@ -148,19 +171,21 @@ def get_summary(limit_per_combo: int = 500) -> list[dict]:
 
 
 def clear() -> None:
-    """Wipe the log. Exposed for the dev UI's 'reset latency data' action -
-    useful when you've been testing/tuning and want a clean slate before a
-    real comparison run."""
+    """Wipe the log (and any rotated backup). Exposed for the dev UI's
+    'reset latency data' action - useful when you've been testing/tuning
+    and want a clean slate before a real comparison run."""
     if _LOG_FILE.exists():
         _LOG_FILE.unlink()
+    backup = _LOG_FILE.with_suffix(_LOG_FILE.suffix + ".1")
+    if backup.exists():
+        backup.unlink()
 
 
-# HONEST LIMITATION: this file grows forever - nothing rotates or caps it
-# automatically. For a demo/test deployment this is a non-issue (latency
-# records are tiny, a few hundred bytes each). For long-running production
-# use, add a simple rotation (e.g. keep the last N days, or the last N
-# records per combo) before this ships for real - noted here rather than
-# silently left as a surprise.
+# Rotation: see _rotate_if_oversized() above - the live file is capped at
+# _MAX_LOG_BYTES with a single ".1" backup, checked on every append.
+# get_summary()'s _read_all() only reads the live file, not the rotated
+# backup - a rotation drops old records from the dev console's aggregates,
+# which is the intended tradeoff (bounded disk over unbounded history).
 
 
 if __name__ == "__main__":

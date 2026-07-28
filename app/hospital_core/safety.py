@@ -38,16 +38,20 @@ Optional[dict] never used Pipecat's params/callback pattern, so it already
 matches compat.py's (and a LiveKit agent's) plain args-in/dict-out shape.
 """
 
+import os
 import re
 from dataclasses import dataclass
 from typing import Optional
 
 # --- CONFIG: set for your deployment ---------------------------------------
 
-EMERGENCY_NUMBER = "1122"  # Pakistan's nationwide Rescue service (confirmed
-# operational in Islamabad via CARES 1122). Update this again if this agent
-# is ever deployed somewhere else - always verify the real local number,
-# don't assume "911" or any other number is universal.
+# Default "1122" is Pakistan's nationwide Rescue service (confirmed
+# operational in Islamabad via CARES 1122) - it is NOT universal. Set
+# EMERGENCY_NUMBER in .env for any other deployment region; always verify
+# the real local number, don't assume "911" applies everywhere. Read from
+# the environment (not hardcoded) so this and compat.py's fallback copy
+# below both derive from one source of truth instead of drifting.
+EMERGENCY_NUMBER = os.environ.get("EMERGENCY_NUMBER", "1122")
 
 # --- rules -------------------------------------------------------------
 

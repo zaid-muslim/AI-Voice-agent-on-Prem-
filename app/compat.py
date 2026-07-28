@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import inspect
+import os
 import re
 import sys
 import uuid as _uuid
@@ -60,7 +61,12 @@ async def _call(fn: Callable, /, **kwargs) -> Any:
 # SAFETY GATE (real: safety.py, 15/15 self-test verified in this revision)
 # ---------------------------------------------------------------------------
 
-_EMERGENCY_NUMBER = "1122"
+# Same env var + default as hospital_core/safety.py's EMERGENCY_NUMBER -
+# this fallback only activates when hospital_core itself failed to import
+# (see run_safety_gate() below), so it can't just import that module's
+# constant directly, but it can still read the same env var instead of
+# hardcoding an independent copy that could silently drift from it.
+_EMERGENCY_NUMBER = os.environ.get("EMERGENCY_NUMBER", "1122")
 
 _FALLBACK_PATTERNS: list[tuple[str, str]] = [
     (

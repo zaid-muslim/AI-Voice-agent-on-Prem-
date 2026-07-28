@@ -8,8 +8,11 @@ anymore - livekit-server owns all WebRTC signaling. All this does:
   GET /api/token   -> mint a room-join JWT for the browser
   GET /            -> serve frontend/index.html (the reception console)
 
-Defaults match `livekit-server --dev` exactly (API key "devkey", secret
-"secret"), so the whole stack runs on one machine with zero config.
+FAILS CLOSED at import time (see helpers.require_real_livekit_credentials)
+if LIVEKIT_API_KEY/SECRET aren't set to a real, non-default pair - this
+endpoint mints signed join tokens, so a deployment that forgets to
+override LiveKit's well-known --dev pair ("devkey"/"secret") would
+otherwise silently hand out publicly-forgeable tokens.
 
 Run:
     uvicorn token_server:app --host 0.0.0.0 --port 7860
@@ -38,10 +41,11 @@ from fastapi.staticfiles import StaticFiles
 
 from livekit import api
 
+from helpers import require_real_livekit_credentials
+
 load_dotenv()
 
-LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY", "devkey")
-LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "secret")
+LIVEKIT_API_KEY, LIVEKIT_API_SECRET = require_real_livekit_credentials()
 # What the BROWSER dials. For phone testing this must be ws://<LAN-IP>:7880.
 LIVEKIT_WS_URL = os.environ.get("LIVEKIT_WS_URL", "ws://localhost:7880")
 

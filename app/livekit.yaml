@@ -1,9 +1,14 @@
+# API keys are deliberately NOT defined here. Supply them via the
+# LIVEKIT_KEYS env var instead (format: "<key>: <secret>", same pair as
+# LIVEKIT_API_KEY/LIVEKIT_API_SECRET in app/.env) - it overrides/supplies
+# this file's `keys:` section without a real secret ever needing to sit in
+# a version-controlled file. Generate a real pair with
+# `docker run --rm livekit/livekit-server generate-keys`. See README
+# Deployment section.
 port: 7880
 bind_addresses:
   - "0.0.0.0"
 rtc:
   tcp_port: 7881
-  port_range_start: 50000
-  port_range_end: 60000
-keys:
-  devkey: secret
+  port_range_start: 20000
+  port_range_end: 21000
