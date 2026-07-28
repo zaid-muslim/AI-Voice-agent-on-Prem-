@@ -1,0 +1,23 @@
+# Matches the versions actually installed/verified in .venv-voice on this
+# project's dev machine (checked via importlib.metadata, not guessed).
+torch==2.6.0
+# Pinned explicitly - faster-qwen3-tts pulls torchaudio in transitively via
+# qwen-tts, and leaving it unpinned let pip resolve torchaudio==2.11.0 in a
+# clean Docker build (a mismatched version needing CUDA 13's
+# libcudart.so.13, which this cu124 base image doesn't have - confirmed
+# live: the container crashed at startup with exactly that
+# OSError). torchaudio==2.6.0 is the version actually paired with
+# torch==2.6.0 in .venv-voice and is the one to pin.
+torchaudio==2.6.0
+faster-qwen3-tts==0.3.0
+transformers==4.57.3
+accelerate==1.12.0
+safetensors==0.8.0
+soundfile==0.14.0
+einops==0.8.2
+scipy==1.15.3
+numpy>=1.24
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.0
+loguru>=0.7
