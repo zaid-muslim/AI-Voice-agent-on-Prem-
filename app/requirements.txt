@@ -2,7 +2,10 @@
 # Candidate STT/TTS engines (parakeet, canary, chatterbox, kokoro, piper) run
 # in their OWN isolated venvs via subprocess and are NOT installed here - see
 # the README's "candidate engines" section for those.
-"livekit-agents[openai,silero,turn-detector]~=1.0"
+# NOTE: no "turn-detector" extra - semantic turn detection now uses
+# livekit.agents.inference.TurnDetector, which ships in the core package
+# (the old livekit-plugins-turn-detector plugin is deprecated upstream).
+livekit-agents[openai,silero]~=1.0
 livekit-api
 livekit
 fastapi>=0.110
@@ -11,8 +14,7 @@ python-dotenv
 loguru
 aiohttp
 numpy>=1.24
-
-# In-process STT fallback (plugins/whisper_stt.py) - the default STT engine
+# In-process STT fallback (plugins/whispe r_stt.py) - the default STT engine
 # is the shared stt_service/server.py instead (see SHARED_STT_BASE_URL), but
 # this stays installed here as the automatic per-worker fallback if that
 # service is unreachable.

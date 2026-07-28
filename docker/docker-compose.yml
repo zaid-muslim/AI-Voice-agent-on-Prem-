@@ -20,12 +20,14 @@ services:
   livekit-server:
     image: livekit/livekit-server:latest
     command: ["--config", "/etc/livekit.yaml", "--dev"]
+    env_file:
+      - ../app/.env   # supplies LIVEKIT_KEYS - see app/livekit.yaml's header comment
     volumes:
       - ../app/livekit.yaml:/etc/livekit.yaml:ro
     ports:
       - "7880:7880"
       - "7881:7881"
-      - "50000-60000:50000-60000/udp"
+      - "20000-21000:20000-21000/udp"
     restart: unless-stopped
 
   vllm:
@@ -44,7 +46,7 @@ services:
       --model /models/gemma-4-12b-w4a16
       --served-model-name gemma-4-12b
       --host 0.0.0.0 --port 8000
-      --max-model-len 4096
+      --max-model-len 8192
       --limit-mm-per-prompt '{"audio": 1}'
       --max-num-seqs 4
       --gpu-memory-utilization ${VLLM_GPU_MEM_UTIL:-0.50}
@@ -84,6 +86,31 @@ services:
       start_period: 60s
     restart: unless-stopped
 
+  # Shared local Qwen3-TTS 0.6B service - OPT-IN (see the "local-tts"
+  # profile below), not started by a plain `docker compose up -d --build`.
+  # Fast local alternative to the default remote PC2 path (~227ms vs
+  # ~523ms to first audio, measured - see README §3/§4/§6), at the cost
+  # of THIS machine's GPU budget. Enable with:
+  #   docker compose -f docker/docker-compose.yml --profile local-tts up -d --build
+  # then set system_config.json's tts.engine to "qwen_shared".
+  tts-service:
+    build:
+      context: ..
+      dockerfile: docker/tts.Dockerfile
+    <<: *gpu
+    profiles: ["local-tts"]
+    volumes:
+      - ../models:/models:ro
+    ports:
+      - "8021:8021"
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request as u; u.urlopen('http://localhost:8021/health', timeout=3)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    restart: unless-stopped
+
   agent:
     build:
       context: ..
@@ -95,6 +122,11 @@ services:
     environment:
       - VLLM_BASE_URL=http://vllm:8000/v1
       - SHARED_STT_BASE_URL=http://stt-service:8020
+      # tts-service is opt-in (profile "local-tts") - this URL is only
+      # ever used if system_config.json's tts.engine is "qwen_shared";
+      # harmless if that service isn't running (same graceful
+      # reachability-check-then-fallback pattern as PC2/qwen_omni).
+      - SHARED_TTS_BASE_URL=http://tts-service:8021
       - LIVEKIT_URL=ws://livekit-server:7880
     volumes:
       - ../app/hospital_core:/srv/app/hospital_core

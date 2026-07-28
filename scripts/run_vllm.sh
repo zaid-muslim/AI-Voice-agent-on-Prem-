@@ -80,6 +80,35 @@
 #    gpu-memory-utilization - but let the tool's own numbers decide that,
 #    not another guess.
 #
+# 5. --max-model-len 4096 -> 8192 (REVERTED - a real bug made 4096 too
+#    tight, not too generous)
+#    A real long call crossed 4096 tokens and then failed identically on
+#    EVERY subsequent turn for the rest of that call (vLLM correctly
+#    rejecting the oversized prompt with HTTP 400) - a conversation just
+#    permanently breaking mid-call is worse than the memory this costs.
+#    Two things changed since --max-model-len was first tightened to
+#    4096, which is why 8192 is safe now where it wasn't before:
+#      a) main.py's on_user_turn_completed now bounds chat history
+#         (CHAT_CTX_MAX_ITEMS) BEFORE it ever reaches vLLM - the unbounded
+#         growth that made hitting any ceiling possible is itself fixed,
+#         so 8192 is a real safety margin, not an invitation for the same
+#         failure to recur further out.
+#      b) --gpu-memory-utilization here is 0.50, not the 0.40 the sizing
+#         math in change #1 above assumed - VERIFIED live at 0.50/8192:
+#         "Available KV cache memory: 3.04 GiB", "GPU KV cache size:
+#         12,648 tokens", "Maximum concurrency for 8,192 tokens per
+#         request: 1.54x" - starts cleanly, no OOM, no ValueError.
+#    HONEST TRADEOFF: 1.54x is vLLM's own worst-case number - if every
+#    concurrent caller maxed out to a full 8192-token conversation
+#    simultaneously, only ~1.5 fit, not the 3-caller target change #1
+#    sized for. Real conversations run nowhere near that (this project's
+#    own logs show ~1800-2300 tokens even for a long multi-turn call), so
+#    3 realistic concurrent callers (~2500 tokens each = ~7500 of the
+#    12,648-token budget) still fits comfortably - but if concurrent load
+#    ever pushes multiple callers into genuinely long conversations at
+#    the same time, watch for degraded throughput or queuing before
+#    assuming the 3-caller target still holds without re-measuring.
+#
 # HOW TO VERIFY THIS ACTUALLY WORKS, DON'T JUST TRUST THE MATH:
 #   1. Start vLLM with this script, check its OWN startup logs for the
 #      KV cache capacity it reports (look for "# GPU blocks" or similar).
@@ -97,7 +126,7 @@ VLLM_ATTENTION_BACKEND=TRITON_ATTN vllm serve \
     --served-model-name gemma-4-12b \
     --host 0.0.0.0 \
     --port 8000 \
-    --max-model-len 4096 \
+    --max-model-len 8192 \
     --limit-mm-per-prompt '{"audio": 1}' \
     --max-num-seqs 4 \
     --gpu-memory-utilization 0.50 \
