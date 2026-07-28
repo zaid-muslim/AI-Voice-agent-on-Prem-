@@ -217,6 +217,45 @@ def _init_db():
                 "INSERT INTO slots (department, doctor, date, time) VALUES (?,?,?,?)",
                 _SEED_SLOTS,
             )
+
+        # Prune stale, NEVER-BOOKED slots that have aged into the past since
+        # this DB was created (see the module docstring's SEED DATES note -
+        # a schedule seeded once never rolls forward on its own). Booked
+        # rows are deliberately left alone: they're real historical
+        # appointments, not schedule-template clutter, and check_availability
+        # / book_appointment already refuse to surface or (re)book them via
+        # the past-date guards in _find_slots_sync / _book_sync.
+        conn.execute(
+            """
+            DELETE FROM slots
+            WHERE date < ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM bookings b
+                  WHERE b.department = slots.department
+                    AND lower(b.doctor) = lower(slots.doctor)
+                    AND b.date = slots.date
+                    AND b.time = slots.time
+              )
+            """,
+            (str(date_cls.today()),),
+        )
+
+        # Top up if pruning (or simply enough real time passing since this
+        # DB was first created) left NO slot dated today or later - an
+        # already-seeded DB is otherwise never reseeded, so without this it
+        # would settle into a permanently empty, un-bookable schedule rather
+        # than an actively wrong one. _SEED_SLOTS was generated relative to
+        # today at module-import time, so this always inserts near-future
+        # dates, never a repeat of stale ones.
+        (future_count,) = conn.execute(
+            "SELECT COUNT(*) FROM slots WHERE date >= ?", (str(date_cls.today()),)
+        ).fetchone()
+        if future_count == 0:
+            conn.executemany(
+                "INSERT OR IGNORE INTO slots (department, doctor, date, time) VALUES (?,?,?,?)",
+                _SEED_SLOTS,
+            )
+
         conn.commit()
     finally:
         conn.close()
@@ -247,15 +286,17 @@ def _find_slots_sync(department, date, limit):
         if dept_row is None:
             return None
 
+        today_str = str(date_cls.today())
+
         query = """
             SELECT s.doctor, s.date, s.time
             FROM slots s
             LEFT JOIN bookings b
                 ON s.department = b.department AND lower(s.doctor) = lower(b.doctor)
                AND s.date = b.date AND s.time = b.time
-            WHERE s.department = ? AND b.booking_id IS NULL
+            WHERE s.department = ? AND b.booking_id IS NULL AND s.date >= ?
         """
-        params = [department.strip().lower()]
+        params = [department.strip().lower(), today_str]
         if date:
             query += " AND s.date = ?"
             params.append(date)
@@ -264,11 +305,11 @@ def _find_slots_sync(department, date, limit):
 
         rows = conn.execute(query, params).fetchall()
 
-        # PAST-TIME FILTER: the JOIN above only excludes slots that are
-        # already BOOKED - it says nothing about whether a slot's time has
-        # already passed TODAY. Use date_cls (not the `date` parameter
-        # this function shadows) to get the real current date/time.
-        today_str = str(date_cls.today())
+        # PAST-TIME FILTER: the SQL above already drops any slot dated
+        # before today via `s.date >= ?`, but a slot dated TODAY can still
+        # be for a time that has already passed - the JOIN only knows about
+        # BOOKED slots, not clock time. Use date_cls (not the `date`
+        # parameter this function shadows) to get the real current date/time.
         now_str = datetime.now().strftime("%H:%M")
         rows = [r for r in rows if not (r[1] == today_str and r[2] < now_str)]
 
@@ -394,6 +435,17 @@ def _book_sync(patient_name, department, doctor, date, time):
             (dept_key, doctor, date, time),
         ).fetchone()
         if not exists:
+            return ("invalid", None)
+
+        # A slot can exist in the `slots` table (the schedule template) and
+        # still be un-bookable because its date/time is already in the past -
+        # this table is never pruned in real time, so it can hold stale rows
+        # between startups. check_availability filters these out for display,
+        # but book_appointment reaches this query directly when the caller
+        # names an explicit doctor, so the same guard must live here too.
+        today_str = str(date_cls.today())
+        now_str = datetime.now().strftime("%H:%M")
+        if date < today_str or (date == today_str and time < now_str):
             return ("invalid", None)
 
         booking_id = uuid.uuid4().hex[:8]
@@ -644,6 +696,12 @@ def _reschedule_sync(booking_id, department, doctor, new_date, new_time):
         if not slot_exists:
             return ("invalid", None)
 
+        # Same past-date/time guard as _book_sync - see its comment.
+        today_str = str(date_cls.today())
+        now_str = datetime.now().strftime("%H:%M")
+        if new_date < today_str or (new_date == today_str and new_time < now_str):
+            return ("invalid", None)
+
         row = conn.execute(
             "SELECT patient_name, created_at FROM bookings WHERE booking_id=?",
             (booking_id,),
@@ -843,8 +901,22 @@ async def add_doctor_slots(department: str, doctor: str, slots: list) -> dict:
     "add new timings" primitive the admin UI calls directly for one-off
     slots, and that add_recurring_schedule() below builds on for patterns."""
     slots = [(d, t) for d, t in slots]
-    added = await asyncio.to_thread(_add_slots_sync, department, doctor, slots)
-    return {"status": "ok", "requested": len(slots), "added": added}
+
+    # Reject past-dated slots up front instead of inserting them - a stale
+    # or fat-fingered date here used to sit in the slots table forever,
+    # invisible to staff, but still schedule-shaped clutter.
+    today_str = str(date_cls.today())
+    now_str = datetime.now().strftime("%H:%M")
+    valid_slots = [
+        (d, t) for d, t in slots if d > today_str or (d == today_str and t >= now_str)
+    ]
+    skipped = len(slots) - len(valid_slots)
+
+    added = await asyncio.to_thread(_add_slots_sync, department, doctor, valid_slots)
+    result = {"status": "ok", "requested": len(slots), "added": added}
+    if skipped:
+        result["skipped_past"] = skipped
+    return result
 
 
 def _generate_recurring_slots(start_date, weeks, weekdays, start_time, end_time, slot_minutes):
@@ -885,6 +957,11 @@ async def add_recurring_schedule(
     the main "add new doctor timings" entry point the admin UI's recurring-
     schedule form calls. weekdays are ints, Mon=0..Sun=6."""
     anchor = date_cls.fromisoformat(start_date) if start_date else date_cls.today()
+    if anchor < date_cls.today():
+        return {
+            "status": "error",
+            "message": f"start_date {anchor} is in the past - use today or later.",
+        }
     slots = _generate_recurring_slots(
         anchor, weeks, set(weekdays), start_time, end_time, slot_minutes
     )
@@ -991,8 +1068,11 @@ async def self_test() -> bool:
     ok3 = r3["status"] == "booked" and r3["patient_name"] == "Alice Kim"
     results.append(("booking an open slot succeeds", ok3, r3))
 
+    # d1 (not d0) - same not-flaky-by-time-of-day reasoning as r3 above;
+    # d0/13:00 used to look fine only because it hadn't passed yet at
+    # whatever time this file's author last ran it.
     r3b = await book_appointment(
-        "Zoe Kim", "cardiology", d0, "13:00", doctor="dr. ayesha siddiqui"
+        "Zoe Kim", "cardiology", d1, "10:00", doctor="dr. ayesha siddiqui"
     )
     ok3b = r3b["status"] == "booked"
     results.append(("booking succeeds despite doctor-name casing drift", ok3b, r3b))
@@ -1061,11 +1141,12 @@ async def self_test() -> bool:
         ("re-cancelling an already-cancelled booking is graceful", ok9, r9)
     )
 
+    # d2 (not d0) - same reasoning: d0/08:30 only "worked" before 8:30am.
     r10setup = await book_appointment(
         "Zoe Kim",
         "general medicine",
-        d0,
-        "08:30",
+        d2,
+        "10:00",
         doctor="Dr. Bilal Ahmed",
     )
     assert r10setup["status"] == "booked", r10setup
@@ -1088,32 +1169,31 @@ async def self_test() -> bool:
         ("cancel: department filter disambiguates correctly", ok10b, r10b)
     )
 
+    # d1/15:30 (not d0) as the initial slot - same not-flaky-by-clock-time
+    # reasoning as the fixes above. d1/11:00 is avoided too since the
+    # concurrency test (r5) above already consumes it.
     r11setup = await book_appointment(
-        "Bob Lee", "cardiology", d0, "14:00", doctor="Dr. Imran Malik"
+        "Bob Lee", "cardiology", d1, "15:30", doctor="Dr. Imran Malik"
     )
     assert r11setup["status"] == "booked", r11setup
 
-    r11 = await update_appointment("Bob Lee", new_date=d1, new_time="15:30")
+    r11 = await update_appointment("Bob Lee", new_date=d2, new_time="11:30")
     ok11 = (
-        r11["status"] == "updated" and r11["date"] == d1 and r11["time"] == "15:30"
+        r11["status"] == "updated" and r11["date"] == d2 and r11["time"] == "11:30"
     )
     results.append(("update_appointment reschedules to an open slot", ok11, r11))
 
-    # Bob Lee's OLD slot before the reschedule above was d0/"14:00" (booked
-    # in r11setup) - NOT "09:00" (a pre-existing copy-paste bug in this
-    # assertion: it happened to still pass whenever the self-test ran
-    # before 9 AM, since d0's untouched "09:00" seed slot is only hidden by
-    # the PAST-TIME FILTER after that time - it was never actually checking
-    # what this test's name says it checks).
-    r12a = await check_availability("cardiology", d0)
-    ok12a = any(s["time"] == "14:00" for s in r12a["slots"])
+    # Bob Lee's OLD slot before the reschedule above was d1/"15:30" (booked
+    # in r11setup).
+    r12a = await check_availability("cardiology", d1)
+    ok12a = any(s["time"] == "15:30" for s in r12a["slots"])
     results.append(("reschedule frees the old slot", ok12a, r12a))
 
     r12b = await book_appointment(
         "Someone Else",
         "cardiology",
-        d1,
-        "15:30",
+        d2,
+        "11:30",
         doctor="Dr. Imran Malik",
     )
     ok12b = (
@@ -1121,17 +1201,17 @@ async def self_test() -> bool:
     )
     results.append(("reschedule occupies the new slot", ok12b, r12b))
 
-    r13 = await update_appointment("Bob Lee", new_date=d1, new_time="23:59")
+    r13 = await update_appointment("Bob Lee", new_date=d2, new_time="23:59")
     ok13 = r13["status"] == "unavailable"
     results.append(
         ("reschedule to invalid slot rejected with alternatives", ok13, r13)
     )
 
-    r14 = await update_appointment("Bob Lee", new_date=d1, new_time="15:30")
+    r14 = await update_appointment("Bob Lee", new_date=d2, new_time="11:30")
     ok14 = r14["status"] == "no_change"
     results.append(("reschedule to identical slot is a graceful no-op", ok14, r14))
 
-    r14b = await update_appointment("Bob Lee", new_time="15:30")
+    r14b = await update_appointment("Bob Lee", new_time="11:30")
     ok14b = r14b["status"] == "no_change"
     results.append(
         ("reschedule to same time (date carried over) is a no-op", ok14b, r14b)
