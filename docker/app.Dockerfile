@@ -11,14 +11,18 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3.12 python3.12-venv python3-pip \
+        software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3.12 python3.12-venv \
     && rm -rf /var/lib/apt/lists/* \
-    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 \
+    && python3.12 -m ensurepip --upgrade
 
 WORKDIR /srv/app
 
 COPY app/requirements.txt .
-RUN pip3 install -r requirements.txt
+RUN python3 -m pip install -r requirements.txt
 
 COPY app/ .
 
