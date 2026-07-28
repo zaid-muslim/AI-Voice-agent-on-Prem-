@@ -24,6 +24,7 @@ models/
 *.db-wal
 *.db-shm
 latency_log.jsonl
+tests/manual/latency_results.json
 
 # Vendored/third-party source checked out locally but not part of this repo
 # (its own git history - see remote/qwen_tts_server/README for setup)
