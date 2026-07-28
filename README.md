@@ -1,116 +1,74 @@
 # Riverside General — AI Voice Receptionist
 
-A self-hosted AI phone receptionist for a (fictional test) hospital, built on
-[LiveKit Agents](https://docs.livekit.io/agents/). A caller can book, cancel,
-or reschedule an appointment, ask general questions, and speak with a
-natural-sounding voice — with a deterministic, LLM-bypassing safety gate for
-real medical emergencies.
+A self-hosted, real-time voice AI receptionist for a (fictional test)
+hospital, built on [LiveKit Agents](https://docs.livekit.io/agents/). A
+caller talks to it over a phone or a browser tab: it checks availability,
+books, cancels, and reschedules appointments; answers general hospital
+questions; and deterministically escalates real medical emergencies — all
+in natural, low-latency speech, with every model in the pipeline running
+on infrastructure you control. No cloud LLM, no cloud STT/TTS, no cloud
+turn-detection API — the entire voice pipeline is self-hosted.
 
-This README is the single source of truth for the project (it replaces the
-old `Readme_technical.md` / `Readme_nontechnical.md` pair). It's written for
-whoever has to run, deploy, or extend this system next.
-
----
-
-## 1. What changed in this revision
-
-Three real problems, fixed:
-
-1. **STT no longer scales per-room.** LiveKit spawns one worker *process*
-   per concurrent call, and the old `faster-whisper` STT plugin loaded its
-   own model inside every one of those processes — N concurrent callers
-   meant N separate whisper models resident in GPU memory at once,
-   competing with the LLM and TTS for the same card. **Fixed** by pulling
-   STT out into [`stt_service/`](stt_service/server.py): one persistent,
-   GPU-warm `faster-whisper` (CTranslate2) process, shared by every
-   worker/room over HTTP, using CTranslate2's own `num_workers` replica
-   pool for concurrency instead of spawning more model copies — the same
-   "one warm shared server" pattern already used for the LLM (vLLM) and TTS
-   (vLLM-Omni on PC2). See [§4](#4-architecture).
-2. **No way to add a doctor's timings without touching the database by
-   hand.** Fixed with a full doctor-schedule admin surface — add a new
-   doctor (with an initial weekly schedule in the same form), add
-   individual or recurring timings for an existing doctor, and remove
-   unbooked slots — see [§6](#6-managing-doctors--schedules).
-3. **The project wasn't organized, had no single dependency manifest, and
-   wasn't dockerized.** Fixed — see [§2](#2-repository-layout) and
-   [§7](#7-docker-deployment).
+This document is the single source of truth for the project: what it is,
+how it's built, and how to run it.
 
 ---
 
-## 2. Repository layout
+## Table of contents
 
-```
-voice-agent-pipeline/
-├── app/                      # the agent + its FastAPI control surfaces
-│   ├── main.py                LiveKit worker entrypoint (agent persona,
-│   │                          function tools, safety gate, session wiring)
-│   ├── token_server.py         mints join tokens + serves frontend/ (:7860)
-│   ├── admin_server.py         hospital data + doctor/schedule admin (:7870)
-│   ├── dev_server.py           model/backend switcher, latency compare (:7871)
-│   ├── system_config.py/.json  which LLM/STT/TTS is active right now
-│   ├── models_registry.json    curated model/engine catalogue for the dev UI
-│   ├── hospital_core/          booking.py (SQLite), hospital_kb.py, rag.py,
-│   │                          safety.py - the domain logic
-│   ├── plugins/                STT/TTS engine adapters (see §5)
-│   ├── frontend/index.html     caller-facing web UI
-│   ├── admin_ui.html            hospital data + doctor schedule admin UI
-│   ├── requirements.txt
-│   └── .env                    local config (see §3)
-├── stt_service/               shared faster-whisper STT server (see §4)
-├── remote/qwen_tts_server/    PC2 (TTS box) Dockerfile + load test
-├── docker/                    all Dockerfiles + compose files (see §7)
-├── scripts/run_vllm.sh        vLLM launch script (bare-metal, non-Docker)
-├── chat_templates/            Gemma tool-calling chat template
-├── tests/test_booking.py      real pytest coverage for hospital_core/booking.py
-└── models/, archive/, remote_services/, data/   gitignored - see below
-```
-
-**Deliberately gitignored / not committed:**
-- `models/` — model weights, fetched separately (see §8).
-- `archive/` — a dead-end STT experiment (a standalone Nemotron ASR server)
-  kept on disk for reference, superseded by `stt_service/`.
-- `remote_services/` — a local vendored clone of `vllm-project/vllm-omni`
-  (its own git history) used during development; `remote/qwen_tts_server/`
-  is the real, tracked, minimal PC2 setup that installs the same project
-  from its own repo instead of vendoring it.
-- `data/`, stray `*.wav`/`*.db` files — scratch/runtime output, not source.
-- The 7 leftover per-engine virtualenvs at the repo root (`.venv-parakeet`,
-  `.venv-kokoro`, etc.) — see [§5](#5-stt--tts-engines) for why they exist.
+1. [Overview](#1-overview)
+2. [Architecture](#2-architecture)
+3. [Voice pipeline & responsiveness](#3-voice-pipeline--responsiveness)
+4. [Configuration & reliability](#4-configuration--reliability)
+5. [STT / TTS engines](#5-stt--tts-engines)
+6. [Managing doctors & schedules](#6-managing-doctors--schedules)
+7. [Deployment](#7-deployment)
+8. [Testing](#8-testing)
+9. [Capacity](#9-capacity)
+10. [Troubleshooting](#10-troubleshooting)
+11. [Repository layout](#11-repository-layout)
 
 ---
 
-## 3. Configuration
+## 1. Overview
 
-`app/.env` holds machine-specific config (paths, IPs, credentials — never
-commit this file). `app/system_config.json` holds *which* LLM/STT/TTS engine
-is active right now, edited live via the dev console at `:7871` or by hand —
-see that file's docstring for the exact "takes effect on the next call, not
-this one" contract.
+The agent is a single LiveKit Agents worker (`app/main.py`) sitting on an
+`AgentSession` pipeline — **VAD → semantic turn detection → STT → LLM →
+TTS** — wired to a real hospital domain layer (`hospital_core/`) instead
+of a toy demo backend:
 
-Key `.env` variables:
+- **Booking** — check availability, book, cancel, and reschedule
+  appointments against a real SQLite-backed schedule
+  (`hospital_core/booking.py`), with fuzzy department/doctor-name
+  matching and double-booking rejection under concurrent requests.
+- **General Q&A** — hours, departments, doctor bios, insurance, billing,
+  parking, lab results, visiting policy — answered via a small RAG layer
+  over hospital data (`hospital_core/rag.py`, `hospital_kb.py`), with a
+  keyword-search fallback if the embedding model isn't installed.
+- **Safety gate** — a fast, deterministic pattern match
+  (`hospital_core/safety.py`) runs on every transcript *before* the LLM
+  ever sees it. A match (e.g. "I'm having chest pain") speaks a fixed
+  escalation message immediately and raises `StopResponse()` — the LLM
+  never generates for that turn, so no prompt can be talked around it.
+  This is defense-in-depth, not the only safety layer: the LLM's own
+  system prompt is also instructed to treat ambiguous distress carefully.
+- **Conversation memory that survives long calls** — every booking/lookup
+  tool call folds what the caller just told it (name, department, doctor,
+  date, time) into the agent's own instructions, not just the raw
+  back-and-forth transcript — see [§4](#4-configuration--reliability) for
+  why this matters and what real failure it prevents.
 
-```bash
-LIVEKIT_URL=ws://localhost:7880
-LIVEKIT_WS_URL=ws://<this-machine's-LAN-IP>:7880   # what the BROWSER dials
+Three **web interfaces** sit alongside the voice agent:
 
-VLLM_BASE_URL=http://127.0.0.1:8000/v1
-
-# Shared STT service (stt_service/server.py) - the default engine
-SHARED_STT_BASE_URL=http://localhost:8020
-
-# Qwen3-TTS via vLLM-Omni, running persistently on PC2 (see §4)
-QWEN_OMNI_BASE_URL=http://<PC2-LAN-IP>:8091/v1
-QWEN_OMNI_MODEL=/path/to/Qwen3-TTS-12Hz-1.7B-CustomVoice
-QWEN_OMNI_VOICE=Aiden
-
-ADMIN_PASSWORD=change-me
-DEV_PASSWORD=change-me
-```
+| Interface | Port | File | Purpose |
+|---|---|---|---|
+| Caller | 7860 | `app/token_server.py` | The person phoning/browsing in |
+| Hospital admin | 7870 | `app/admin_server.py` | Doctors, schedules, hours (password-gated) |
+| Developer console | 7871 | `app/dev_server.py` | Model switching, live latency comparison (password-gated) |
 
 ---
 
-## 4. Architecture
+## 2. Architecture
 
 ```
 Caller's browser/phone
@@ -119,38 +77,190 @@ Caller's browser/phone
 livekit-server (signaling + media, self-hosted)
         │
         ▼
-app/main.py ── AgentSession(vad, stt, llm, tts, turn_detection)
+app/main.py ── AgentSession(vad, stt, llm, tts, turn_handling)
         │             │        │      │
-        │             │        │      └─ HTTP → PC2's vLLM-Omni (Qwen3-TTS)
+        │             │        │      └─ HTTP → TTS engine (see §5)
         │             │        └─ HTTP → vLLM (Gemma 4 12B)
         │             └─ HTTP → stt_service/server.py (shared faster-whisper)
         ▼
 hospital_core/ (booking.py, safety.py, rag.py, hospital_kb.py)
 ```
 
-Three persistent, shared, GPU-warm servers — **not** spawned per call — sit
-behind the agent: vLLM for the LLM, `stt_service/server.py` for STT, and
-vLLM-Omni (on a second machine, "PC2") for TTS. Every concurrent room hits
-the *same* three servers over HTTP instead of each getting its own copy;
-this is the one architectural idea the whole stack is built around, and
-`stt_service/` brings STT in line with the other two.
+Persistent, GPU-warm servers sit behind the agent — **not** spawned per
+call: vLLM for the LLM, `stt_service/server.py` for STT, and a TTS engine
+(remote on a second machine, or a fast local option — see §5). Every
+concurrent room hits the *same* servers over HTTP instead of each getting
+its own model copy. This is the single architectural idea the whole
+stack is built around, for two reasons at once:
 
-**Three web interfaces:**
+1. **Speed** — a cold model load (seconds) never happens on a real
+   caller's turn; everything is warmed once at process start (see
+   [§3](#3-voice-pipeline--responsiveness)).
+2. **Memory** — LiveKit spawns one worker *process* per concurrent call.
+   Without this pattern, N concurrent callers would mean N separate
+   copies of every model resident in GPU memory at once, competing for
+   the same card. `stt_service/` exists specifically to bring STT in line
+   with how the LLM (vLLM) already worked.
 
-| Interface | Port | File | Purpose |
-|---|---|---|---|
-| Caller | 7860 | `app/token_server.py` | The person phoning in |
-| Hospital admin | 7870 | `app/admin_server.py` | Doctors, schedules, hours |
-| Developer console | 7871 | `app/dev_server.py` | Model switching, latency comparison |
+**Why TTS can live on a second machine ("PC2")**: frees PC1's GPU budget
+for STT + LLM, while PC2's TTS server stays warm and shared across every
+caller. This is optional — §5 covers a fast local alternative that needs
+no second machine at all.
 
-**Why TTS lives on a second machine ("PC2")**: freeing PC1's GPU budget for
-STT + LLM, while PC2's TTS server stays warm and shared across every caller.
-STT does **not** need a second machine to get the same benefit — a shared
-server on the *same* box already removes the per-process multiplication
-problem, since the bottleneck was redundant model copies, not raw GPU
-contention with the LLM (whisper's memory footprint is small next to
-Gemma's). Split `stt_service/` onto its own machine later the same way, via
-`SHARED_STT_BASE_URL`, if STT and LLM ever do start contending for VRAM.
+---
+
+## 3. Voice pipeline & responsiveness
+
+The pipeline is tuned around one goal: **the agent should feel like it's
+actually listening, not processing** — minimizing the gap between the
+caller finishing a thought and the agent's reply starting. In practice,
+once the agent is confident you've finished speaking, it typically starts
+responding in **well under a second**, thanks to the combination below.
+Every technique here is real and running in `app/main.py`, verified
+against the actual running system, not aspirational:
+
+**Semantic turn detection, not a fixed silence timer.** A fixed timer
+("0.3s of quiet = they're done") is the classic failure mode: too short
+and the agent barges in mid-thought; too long and every reply feels
+sluggish. This pipeline splits the question in two — Silero VAD answers
+"is there sound," while a semantic turn-detector model
+(`livekit.agents.inference.TurnDetector`) answers "is the *thought*
+actually finished." It's pinned to run **fully locally**
+(`version="v1-mini"`) rather than LiveKit's cloud-hosted default — this
+stack has no other cloud dependency, and a semantic decision on the
+hottest path in the system shouldn't add a network hop. It's also
+audio-native: it classifies directly on the caller's audio stream, not on
+a finished transcript, so it doesn't wait on STT to decide whether the
+turn is over.
+
+**Adaptive endpointing, tuned against a real call, not a guess.** The
+wait after the turn detector signals "likely done" adapts to the
+caller's own recent speaking cadence (an EMA over recent turns), bounded
+by a floor and ceiling. The ceiling was originally set generously (6
+seconds, to give a caller reciting a date room to pause) — a real test
+call showed this was the wrong tradeoff: half that call's turns hit the
+full ceiling before the agent even started processing, which reads as
+broken, not patient. Corrected to match LiveKit's own documented default
+for this exact configuration, based on real evidence rather than a
+guess.
+
+**Preemptive generation.** The LLM starts inferring on stable partial
+transcript text *before* the turn is even confirmed finished — by the
+time the turn detector confirms end-of-turn, the LLM may already be
+partway through its answer.
+
+**Streaming end to end.** LLM tokens stream from vLLM as they're
+generated, and TTS audio streams back progressively rather than waiting
+for a full reply to synthesize before any of it plays — verified live,
+not assumed: a realistic multi-sentence reply's audio arrives spread over
+several seconds, tracking real synthesis progress, not dumped all at
+once. STT is the one stage that stays batch rather than streaming, by
+deliberate choice: `faster-whisper` is a batch-decode model, and it isn't
+the bottleneck in this pipeline anyway.
+
+**Nothing cold on a caller's first turn.** VAD, STT, and the RAG embedder
+are all warmed once per worker process *before* that process accepts any
+job; the LLM and TTS both get a real warm-up call at session start. A
+cold model load never happens on a real caller's turn.
+
+**An immediate acknowledgment on the turns that genuinely need it.**
+Even with everything above, some requests (particularly ones that need a
+tool call — checking availability, looking something up) take a moment
+longer than others. Rather than leaving the caller in silence, the agent
+speaks a short, natural acknowledgment ("One moment," "Let me check that
+for you") *only* when a reply is taking longer than expected — tuned
+against real call data so it doesn't fire on turns that were about to
+answer anyway (an earlier, too-aggressive version did exactly that, and
+it read as artificial — fixed by calibrating against what real replies
+actually need, not a guess).
+
+**Measure, don't guess.** `latency_log.py` + the dev console (`:7871`)
+record real per-turn timing for every call, tagged by which
+LLM/STT/TTS combination was active, so any future config change can be
+compared against real numbers instead of intuition. `tests/manual/`
+holds the actual measurement tools (`benchmark_latency.py` for
+per-component timing, `e2e_call_latency_test.py` for a full synthetic
+phone call against the live stack) if you want to verify any of this
+yourself after a change.
+
+---
+
+## 4. Configuration & reliability
+
+`app/.env` holds machine-specific config (paths, IPs, credentials — never
+commit this file; see `app/.env.example`). `app/system_config.json` holds
+*which* LLM/STT/TTS engine is active right now, edited live via the dev
+console at `:7871` or by hand — see that file's docstring for the exact
+"takes effect on the next call, not this one" contract.
+
+### Long conversations don't break
+
+Two real problems, found on live calls and fixed properly, not patched
+around:
+
+1. **Chat history is bounded against the LLM's context window.** Nothing
+   originally capped how much conversation history accumulated turn over
+   turn. A sufficiently long real call crossed vLLM's configured context
+   limit and then failed identically on *every* subsequent turn — the
+   agent just stopped responding, permanently, for that call. Fixed via
+   `ChatContext.truncate()` in `on_user_turn_completed` — the framework's
+   own sanctioned tool for this: keeps recent history, always preserves
+   the system prompt, never leaves a dangling tool call without its
+   result.
+2. **Key facts survive even when old turns get trimmed.** Bounding raw
+   history isn't enough on its own — it only guarantees the *system
+   prompt* survives, not a fact the caller mentioned early in a long call
+   (their name, which department, a confirmed date). Every booking/lookup
+   tool call now folds whatever the caller just stated into the agent's
+   own instructions (via `update_instructions()`, rebuilt from the base
+   prompt each time so a corrected date replaces the old one instead of
+   both lingering) — so a long conversation never "forgets" who it's
+   talking to, the way a human receptionist wouldn't either.
+
+Key `.env` variables:
+
+```bash
+# REQUIRED, no default - generate with:
+#   docker run --rm livekit/livekit-server generate-keys
+LIVEKIT_URL=ws://localhost:7880
+LIVEKIT_API_KEY=
+LIVEKIT_API_SECRET=
+LIVEKIT_KEYS="<key>: <secret>"        # same pair, format livekit-server reads
+
+VLLM_BASE_URL=http://127.0.0.1:8000/v1
+SHARED_STT_BASE_URL=http://localhost:8020
+QWEN_OMNI_BASE_URL=http://<PC2-LAN-IP>:8091/v1
+QWEN_OMNI_MODEL=/path/to/Qwen3-TTS-12Hz-1.7B-CustomVoice
+QWEN_OMNI_VOICE=Aiden
+
+EMERGENCY_NUMBER=1122                 # set for YOUR deployment region
+ADMIN_PASSWORD=change-me
+DEV_PASSWORD=change-me
+```
+
+**Fail-closed by design**: `main.py` and `token_server.py` both refuse to
+start if `LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET` are unset *or* still equal
+LiveKit's well-known `--dev` default (`devkey`/`secret`). Those two
+endpoints mint and validate room-join tokens, so a deployment that forgot
+to override the public dev default would otherwise silently hand out
+forgeable tokens instead of failing loudly at startup.
+
+### Security considerations
+
+- **Admin (`:7870`) and dev (`:7871`) consoles** use HTTP Basic Auth,
+  which sends credentials base64-encoded on every request — fine on a
+  trusted LAN, not fine over the open internet without a TLS-terminating
+  reverse proxy in front (none is included in this repo — add one, e.g.
+  nginx or Caddy, before exposing either console beyond a LAN/demo).
+- **`livekit-server --dev`** (used in `docker/docker-compose.yml`) is a
+  deliberate choice for this project's single-box, non-clustered
+  deployment model, not an oversight — see LiveKit's own
+  [clustering docs](https://docs.livekit.io/transport/self-hosting/deployment/)
+  if you outgrow one machine.
+- **`EMERGENCY_NUMBER`** defaults to Pakistan's "1122" — a placeholder,
+  not a universal number. Set it correctly for wherever this is actually
+  deployed; `hospital_core/safety.py` is explicit that this is a
+  heuristic prototype, not a validated clinical triage system.
 
 ---
 
@@ -158,22 +268,55 @@ Gemma's). Split `stt_service/` onto its own machine later the same way, via
 
 **Default, production path:**
 - STT: shared `faster-whisper distil-large-v3` via `stt_service/server.py`
-  (engine `whisper_shared` in `system_config.json`). Falls back
-  automatically to the in-process `plugins/whisper_stt.py` (engine
-  `whisper`) if the shared service is unreachable at worker startup.
-- TTS: Qwen3-TTS via vLLM-Omni on PC2 (engine `qwen_omni`, the default).
-  Falls back to a local subprocess bridge (`plugins/qwen_tts.py`, engine
-  `qwen_local_subprocess`) if PC2 is unreachable.
+  (engine `whisper_shared`). Falls back automatically to the in-process
+  `plugins/whisper_stt.py` (engine `whisper`) if the shared service is
+  unreachable at worker startup.
+- TTS: Qwen3-TTS via vLLM-Omni on a second machine ("PC2", engine
+  `qwen_omni`). If PC2 is unreachable at a worker's startup, it falls
+  back in order of closest-to-PC2's-quality/latency: first `qwen_shared`
+  (the fast local option below, if it happens to be running — no cold
+  start), then `qwen_local_subprocess` (a fresh per-worker subprocess as
+  the last resort — always available, but pays a real cold-start cost on
+  that call since it isn't prewarmed).
+
+**Fast local alternative — shared Qwen3-TTS 0.6B (engine `qwen_shared`)**:
+a second machine for TTS isn't always available, and the smaller local
+model is meaningfully faster to first audio anyway, since there's no
+network hop and no per-worker-process subprocess spawn.
+`tts_service/server.py` loads the model ONCE, GPU-warm, shared by every
+room over HTTP — the same "one persistent server" pattern
+`stt_service/server.py` already uses for STT, applied to the local Qwen
+path (`plugins/shared_qwen_tts.py` is the LiveKit-side client). Start it
+with:
+```bash
+python tts_service/server.py   # needs the .venv-voice stack - see tts_service/requirements.txt
+```
+then set `system_config.json`'s `tts.engine` to `"qwen_shared"` (or via
+the dev console). Falls back to the remote PC2 path automatically if
+`SHARED_TTS_BASE_URL` isn't reachable at worker startup.
+
+**The real tradeoff, not just speed**: this engine uses *this* machine's
+GPU budget (competing with vLLM + shared STT for VRAM) instead of PC2's —
+the "3 concurrent callers" capacity budget in [§9](#9-capacity) assumed
+PC2 handling TTS. There's also an unverified voice-quality difference
+between the 0.6B and 1.7B checkpoints. Choose based on your deployment:
+one box with no PC2 and speed matters most → `qwen_shared`; multiple
+concurrent callers and PC1 GPU headroom matters most → the default
+`qwen_omni`. Concurrency note: unlike `stt_service/server.py` (which
+documents a safe replica pool via CTranslate2), `tts_service/server.py`
+serializes requests through a single lock — concurrent generation was
+tested and found to corrupt output, so this is a deliberately
+conservative default, not a proven scaling ceiling.
 
 **Candidate engines** (real, working, but each needs its own isolated
 virtualenv on the host and are **not** included in the Docker images —
-dockerizing five extra heavyweight ML stacks that aren't the actual
-production path wasn't worth the image bloat/build complexity):
+dockerizing five extra heavyweight ML stacks that aren't the production
+path wasn't worth the image bloat):
 
 | Engine | Type | Needs | License note |
 |---|---|---|---|
 | Parakeet TDT (STT) | subprocess | `.venv-parakeet`, own NeMo build | CC-BY-4.0 |
-| Canary 180M Flash (STT) | subprocess | same NeMo venv as Parakeet | CC-BY-4.0 (use the *flash* variant, not `canary-1b`, which is non-commercial) |
+| Canary 180M Flash (STT) | subprocess | same NeMo venv as Parakeet | CC-BY-4.0 (use *flash*, not `canary-1b`, which is non-commercial) |
 | Chatterbox (TTS) | subprocess | `.venv-chatterbox`, pins `torch==2.6.0` | see resemble-ai/chatterbox |
 | Kokoro-82M (TTS) | subprocess | `.venv-kokoro` | Apache-2.0 |
 | Piper (TTS) | subprocess, CPU-only | `.venv-piper` | **GPL-3.0-or-later** — get legal sign-off before commercial use |
@@ -181,6 +324,9 @@ production path wasn't worth the image bloat/build complexity):
 Each is selected via `system_config.json`'s `stt`/`tts.engine`, and each
 falls back to the production default if its required `*_PYTHON`/`*_WORKER`
 env vars aren't set — see `app/main.py`'s `_make_stt()`/`_make_tts()`.
+Not every engine in `models_registry.json` has been run on a real, live
+call — each entry is labeled **verified** or **candidate**; check that
+file before trusting an option in production.
 
 ---
 
@@ -190,16 +336,14 @@ env vars aren't set — see `app/main.py`'s `_make_stt()`/`_make_tts()`.
 
 - **Hospital Data** — doctor bios, departments, hours, and other
   informational content the AI quotes to callers (`hospital_data.json`).
-- **Doctor Schedules** (new) — the actual bookable calendar
+- **Doctor Schedules** — the actual bookable calendar
   (`hospital_core/booking.py`'s SQLite `slots` table):
-  - **Add a new doctor**: name, department, an optional bio, and
-    (optionally, in the same form) an initial recurring weekly schedule —
-    e.g. "Mon/Wed/Fri, 09:00–13:00, 30-minute slots, next 4 weeks." Writes
-    the bio into hospital data AND the initial timings in one call, closing
-    the "two sources of truth must be kept in sync by hand" gap the old
-    code only warned about in a comment.
-  - **Add timings for an existing doctor**: either explicit one-off
-    date/time slots, or the same recurring weekly pattern.
+  - **Add a new doctor**: name, department, optional bio, and optionally
+    an initial recurring weekly schedule in the same form (e.g. "Mon/Wed/
+    Fri, 09:00–13:00, 30-minute slots, next 4 weeks") — writes the bio
+    into hospital data *and* the initial timings in one call.
+  - **Add timings for an existing doctor**: one-off date/time slots, or
+    the same recurring weekly pattern.
   - **Remove a timing**: only for slots nobody has booked yet — a booked
     slot must be cancelled through the normal call flow first.
 
@@ -207,23 +351,32 @@ Underlying API (`app/admin_server.py`, all behind the same admin
 Basic-Auth): `GET /api/doctors`, `GET /api/doctors/slots`,
 `POST /api/doctors`, `POST /api/doctors/slots`, `DELETE /api/doctors/slots`.
 
+**Cross-process note**: the live agent worker(s) run as separate
+processes with their own in-memory copy of hospital data. Admin saves
+reload/re-embed in the admin server's own process immediately; agent
+workers pick up the change on their *next new call* (they re-read at
+call/session start), not mid-call.
+
 ---
 
-## 7. Docker deployment
+## 7. Deployment
 
-Everything runs in containers except the two per-machine model directories
-(`models/` and PC2's `models/qwen3-tts/`), which are volume-mounted rather
-than baked into images. Requires the
+Requires the
 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
 on both machines (`docker info | grep -i runtime` should list `nvidia`).
 
-**PC1** (agent + LLM + STT + the three web interfaces):
-
+**0. Generate real LiveKit credentials (once):**
 ```bash
-cp app/.env.example app/.env   # if you don't already have one - edit for your machine
-docker compose -f docker/docker-compose.yml up -d --build
+docker run --rm livekit/livekit-server generate-keys
+# copy the printed key/secret into LIVEKIT_API_KEY, LIVEKIT_API_SECRET,
+# and LIVEKIT_KEYS in app/.env - see §4.
 ```
 
+**PC1** (agent + LLM + STT + the three web interfaces):
+```bash
+cp app/.env.example app/.env   # edit for your machine + step 0's keys
+docker compose -f docker/docker-compose.yml up -d --build
+```
 Services: `livekit-server` (:7880), `vllm` (:8000, Gemma 4 12B),
 `stt-service` (:8020, shared faster-whisper), `agent` (the LiveKit worker,
 no exposed port), `token-server` (:7860), `admin-server` (:7870),
@@ -232,24 +385,36 @@ image) so `agent` and `admin-server` share one real, persistent database.
 
 **PC2** (Qwen3-TTS box) — copy `remote/qwen_tts_server/` and
 `models/qwen3-tts/` to the second machine, then:
-
 ```bash
 docker compose -f docker/docker-compose.pc2.yml up -d --build
 ```
-
 Point PC1's `QWEN_OMNI_BASE_URL` at this machine's LAN IP, port 8091.
+
+**Optional: fast local TTS (`tts-service`)** — opt-in, not started by a
+plain `docker compose up`, since it isn't the default engine (§5):
+```bash
+docker compose -f docker/docker-compose.yml --profile local-tts up -d --build tts-service
+```
+Then set `system_config.json`'s `tts.engine` to `"qwen_shared"`. Can run
+on PC1 (`SHARED_TTS_BASE_URL=http://tts-service:8021`, the compose
+default) or on PC2 instead — copy `tts_service/` +
+`models/Qwen3-TTS-0.6B-custom/` there, run the same profile command on
+that machine, and point PC1's `SHARED_TTS_BASE_URL` at its LAN IP.
+
+**Note on rebuild speed**: `docker compose up --build` only re-downloads
+dependencies when `app/requirements.txt` itself changes — the Dockerfile
+copies and installs requirements *before* copying the rest of the app
+source, so editing `main.py` and rebuilding is fast (seconds, cached
+layer), not a repeat of the full dependency download.
 
 **Known Docker-specific limitation**: the `qwen_local_subprocess` /
 candidate-engine fallbacks that spawn a subprocess in a separate host venv
 (`.venv-voice`, `.venv-parakeet`, etc.) aren't available inside the
-container, since those venvs don't exist there. If PC2 is unreachable, the
-containerized `agent` will log the failure rather than silently falling
-back to a local subprocess — run bare-metal (not via Docker) instead if you
-need that specific fallback path available.
+container — those venvs don't exist there. If PC2 is unreachable, the
+containerized `agent` logs the failure rather than silently falling back
+to a local subprocess; run bare-metal instead if you need that fallback.
 
----
-
-## 8. Bare-metal setup (no Docker)
+### Bare-metal (no Docker)
 
 **PC1:**
 ```bash
@@ -260,13 +425,17 @@ cd app && python main.py download-files
 `livekit.yaml` must bind `0.0.0.0`, not just loopback, or nothing outside
 `localhost` can connect. Then, one terminal each:
 ```bash
-livekit-server --config app/livekit.yaml --dev
+LIVEKIT_KEYS="<key>: <secret>" livekit-server --config app/livekit.yaml --dev
 bash scripts/run_vllm.sh                              # LLM
 python stt_service/server.py                          # shared STT
 cd app && python main.py dev                           # agent
 uvicorn token_server:app --host 0.0.0.0 --port 7860
 uvicorn admin_server:app --host 0.0.0.0 --port 7870
 uvicorn dev_server:app   --host 0.0.0.0 --port 7871
+```
+Optional, only if using the fast local TTS path instead of PC2 (§5):
+```bash
+python tts_service/server.py                          # shared local Qwen3-TTS
 ```
 
 **PC2:**
@@ -277,17 +446,7 @@ vllm serve /path/to/Qwen3-TTS-12Hz-1.7B-CustomVoice --omni --port 8091
 
 ---
 
-## 9. What's proven vs. what's a candidate
-
-Not every engine in `models_registry.json` has been used on a real, live
-call. Each entry is labeled **verified** (actually run on this project's own
-hardware/logs) or **candidate** (a real, working integration, API-checked
-against its published source, but not yet proven end-to-end here) — check
-that file before trusting an option in production.
-
----
-
-## 10. Testing
+## 8. Testing
 
 ```bash
 pip install pytest
@@ -295,23 +454,123 @@ pytest tests/test_booking.py -v
 ```
 
 Covers the real booking engine: double-booking rejection (sequential *and*
-concurrent), fuzzy department/doctor-name matching, cancel/reschedule flows,
-the past-time slot filter, and the new schedule-management functions
+concurrent), fuzzy department/doctor-name matching, cancel/reschedule
+flows, the past-time slot filter, and schedule-management functions
 (recurring-schedule generation, slot removal, refusing to remove a booked
 slot).
 
+`tests/manual/` holds ad-hoc scripts that need a GPU and locally-running
+services, run by hand rather than in CI:
+- `benchmark_latency.py` — real per-component timing (VAD, turn detector,
+  STT, LLM, TTS) against whichever services are actually running.
+- `e2e_call_latency_test.py` — joins the live room as a synthetic caller
+  and measures a full real call end to end.
+- Load tests, manual voice/text smoke tests for individual engines.
+
 ---
 
-## 11. Capacity (measured on a single RTX 3090, 24GB)
+## 9. Capacity
 
+Measured on a single RTX 3090 (24GB):
 - vLLM (Gemma 4 12B, bfloat16 KV cache — this GPU has no native FP8
-  hardware): `--max-num-seqs 4`, tuned for **3 concurrent callers** with
-  headroom, ~9.6GB reserved at `--gpu-memory-utilization 0.50`.
-- Marginal cost per concurrent caller (STT + local TTS fallback, not vLLM):
-  ~4.6GB with Qwen-local, ~2.7GB with Kokoro.
-- Offloading TTS to PC2 frees additional PC1 budget for concurrent
-  STT+LLM callers beyond the 3-caller baseline above (not yet re-measured
-  post-split).
+  hardware): `--max-num-seqs 4`, `--max-model-len 8192`,
+  `--gpu-memory-utilization 0.50`. Verified live: 12,648 tokens of KV
+  cache capacity. vLLM's own worst-case estimate is **1.54x concurrency
+  at a full 8192-token conversation per caller** — but real conversations
+  measured on this project run ~1800-2300 tokens even for a long
+  multi-turn call, so **3 realistic concurrent callers** (~2500 tokens
+  each) still fits comfortably within that budget. `max-model-len` was
+  raised from an earlier, tighter 4096 after a real long call hit that
+  ceiling and broke permanently mid-conversation — see
+  [§4](#4-configuration--reliability) for the chat-history bounding fix
+  that makes the higher ceiling a safety margin rather than an invitation
+  for the same failure further out.
+- Marginal cost per concurrent caller (STT + local TTS fallback, not
+  vLLM): ~4.6GB with Qwen-local, ~2.7GB with Kokoro.
+- Offloading TTS to PC2 (or the local `qwen_shared` service, §5) frees
+  additional PC1 budget for concurrent STT+LLM callers.
 
-See `scripts/run_vllm.sh`'s comments for the full memory-budget derivation,
-including the real vLLM startup failure that led to `--max-model-len 4096`.
+See `scripts/run_vllm.sh`'s comments for the full memory-budget
+derivation, including the real `max-model-len` history.
+
+---
+
+## 10. Troubleshooting
+
+**Caller device connects but the mic never activates / nothing happens
+when you talk**: browsers block microphone access on plain `http://`
+unless the origin is `localhost` or explicitly treated as secure. Android
+Chrome: `chrome://flags/#unsafely-treat-insecure-origin-as-secure` → add
+your `http://<LAN-IP>:7860`. Desktop Chrome supports the same flag.
+iPhone Safari needs a local HTTPS cert (mkcert) instead — the flag trick
+doesn't work there.
+
+**"Could not establish peer connection" / connects on one device but not
+another on the same network**: this is a WebRTC/UDP problem, not an
+application bug — the browser reached the signaling server fine (the
+page loaded), but the actual audio media connection never got
+established. This self-hosted setup has no TURN relay, so it needs direct
+UDP connectivity between the caller's device and the server on ports
+`20000-21000` (+ TCP `7881`, see `docker/docker-compose.yml`). Most
+common causes, roughly in order of likelihood:
+- A **VPN active on the client device** — tunnels traffic away from the
+  LAN so it can't reach the server directly even though HTTP somehow
+  still works. Disconnect it and retry.
+- The client device's own **firewall** silently blocking outbound UDP on
+  those ports for the browser.
+- **WiFi client isolation** — some networks (especially "guest" WiFi)
+  block device-to-device traffic entirely. Make sure every device is on
+  the same, non-isolated network.
+
+**Long conversation goes silent partway through**: see
+[§4](#4-configuration--reliability) — this was a real bug (unbounded chat
+history hitting the LLM's context limit) that's now fixed. If it recurs,
+check the agent's logs for an HTTP 400 from vLLM mentioning "maximum
+context length."
+
+---
+
+## 11. Repository layout
+
+```
+voice-agent-pipeline/
+├── app/                      # the agent + its FastAPI control surfaces
+│   ├── main.py                 LiveKit worker entrypoint (agent persona,
+│   │                            function tools, safety gate, session wiring)
+│   ├── token_server.py         mints join tokens + serves frontend/ (:7860)
+│   ├── admin_server.py         hospital data + doctor/schedule admin (:7870)
+│   ├── dev_server.py           model/backend switcher, latency compare (:7871)
+│   ├── helpers.py              run_with_filler, push_ui, credential fail-closed
+│   ├── system_config.py/.json  which LLM/STT/TTS is active right now
+│   ├── models_registry.json    curated model/engine catalogue for the dev UI
+│   ├── hospital_core/          booking.py (SQLite), hospital_kb.py, rag.py,
+│   │                            safety.py - the domain logic
+│   ├── plugins/                STT/TTS engine adapters (see §5)
+│   ├── frontend/index.html     caller-facing web UI
+│   ├── admin_ui.html            hospital data + doctor schedule admin UI
+│   ├── requirements.txt
+│   └── .env                    local config (see §4) - gitignored
+├── stt_service/               shared faster-whisper STT server (see §2)
+├── tts_service/                shared local Qwen3-TTS 0.6B server (see §5)
+├── remote/qwen_tts_server/    PC2 (TTS box) Dockerfile + load test
+├── docker/                    all Dockerfiles + compose files (see §7)
+├── scripts/run_vllm.sh        vLLM launch script (bare-metal, non-Docker)
+├── chat_templates/            Gemma tool-calling chat template
+├── tests/
+│   ├── test_booking.py         real pytest coverage (see §8)
+│   └── manual/                 ad-hoc load/latency/smoke scripts, not CI
+└── models/, archive/, remote_services/, data/   gitignored - see below
+```
+
+**Deliberately gitignored / not committed:**
+- `models/` — model weights, fetched separately.
+- `archive/` — a dead-end STT experiment (a standalone Nemotron ASR
+  server) kept on disk for reference, superseded by `stt_service/`.
+- `remote_services/` — a local vendored clone of `vllm-project/vllm-omni`
+  (its own git history) used during development; `remote/qwen_tts_server/`
+  is the real, tracked, minimal PC2 setup that installs the same project
+  from its own repo instead of vendoring it — these two are intentionally
+  different things, not a duplicate.
+- `data/`, stray `*.wav`/`*.db` files — scratch/runtime output, not source.
+- The per-engine virtualenvs at the repo root (`.venv-parakeet`,
+  `.venv-kokoro`, etc.) — see [§5](#5-stt--tts-engines) for why they exist.
