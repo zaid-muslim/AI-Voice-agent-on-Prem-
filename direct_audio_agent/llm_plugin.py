@@ -68,7 +68,6 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
-from loguru import logger
 
 from livekit.agents import (
     APIConnectionError,

@@ -1198,7 +1198,6 @@ async def self_test() -> bool:
     d0 = str(today)
     d1 = str(today + timedelta(days=1))
     d2 = str(today + timedelta(days=2))
-    d3 = str(today + timedelta(days=3))
     past_date = str(today - timedelta(days=365))
 
     results = []

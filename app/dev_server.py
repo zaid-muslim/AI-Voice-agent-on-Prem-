@@ -144,7 +144,6 @@ async def switch_llm(req: LLMSwitchRequest, _: str = Depends(_check_auth)) -> di
         raise HTTPException(status_code=409, detail="A switch is already in progress.")
 
     async def _run():
-        cfg = system_config.get_config()
         display = req.display_name or req.served_model_name
         result = await _manager.switch_model(
             source=req.source, served_model_name=req.served_model_name

@@ -5,7 +5,6 @@ import signal
 import threading
 import time
 import numpy as np
-import torch
 
 # CRITICAL: the parent bridge owns this process's lifecycle exclusively
 # (it kills us via _cleanup_process on stop/cancel). Ignore SIGINT so a

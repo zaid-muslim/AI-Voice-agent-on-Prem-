@@ -32,7 +32,6 @@ both, but confirm on your box with the standalone check in the README.
 from __future__ import annotations
 
 import asyncio
-import os
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np

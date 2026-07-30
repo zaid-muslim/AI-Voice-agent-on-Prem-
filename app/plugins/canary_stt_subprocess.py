@@ -19,7 +19,6 @@ ENV VARS:
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import os
 import threading

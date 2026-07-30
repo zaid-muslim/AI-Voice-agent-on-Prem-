@@ -54,7 +54,6 @@ from livekit.agents import (
     APIConnectOptions,
     DEFAULT_API_CONNECT_OPTIONS,
     tts,
-    utils,
 )
 
 WORKER_READ_TIMEOUT_SECS = 30.0

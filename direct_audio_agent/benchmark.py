@@ -51,7 +51,6 @@ import statistics
 import sys
 import time
 import urllib.request
-from dataclasses import asdict
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -148,7 +147,6 @@ def _vllm_reachable() -> bool:
 # Pipeline stages - each returns (elapsed_seconds, text, extra: dict)
 # --------------------------------------------------------------------------
 def _whisper_transcribe(wav_bytes: bytes) -> tuple[float, str, dict]:
-    import io
 
     boundary = "----benchmarkboundary"
     body = (
