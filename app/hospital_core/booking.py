@@ -88,7 +88,7 @@ time it is right now.
   IMPORT NAMING NOTE: this function's own parameter is named `date`,
   which shadows the `date` class imported from the datetime module at
   the top of this file. `datetime.date` is imported under the alias
-  `date_cls` specifically so this function can call `date_cls.today()`
+  `date_cls` specifically so this function can call `_local_today()`
   without colliding with its own `date` parameter - calling plain
   `date.today()` inside this function would instead try (and fail) to
   call `.today()` on whatever string was passed in as the slot-lookup
@@ -122,6 +122,7 @@ filler hook). Both are removed here. Specific changes:
 
 import asyncio
 import os
+import re
 import sqlite3
 import uuid
 from datetime import date as date_cls
@@ -129,8 +130,107 @@ from datetime import datetime, timedelta, timezone
 from difflib import get_close_matches
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 DB_PATH = Path(__file__).parent / "hospital_bookings.db"
+
+# REAL BUG, found live 2026-07-30, not hypothetical: a caller phoning in
+# at 10:30 AM local time got a 9:30 AM slot booked for them - already
+# half an hour in the past. Root cause: every "what's the date/time
+# right now" check in this file (the PAST-TIME FILTER in
+# _find_slots_sync/_book_sync/_reschedule_sync, the seed-date generator,
+# the admin schedule helpers) used naive `date_cls.today()` /
+# `datetime.now()`, which return the CONTAINER's system clock in
+# whatever timezone the container happens to be running in - confirmed
+# live: `docker exec agent date` showed UTC (05:37) while the actual
+# caller's local time was 10:37 (Asia/Karachi, UTC+5). From the
+# container's point of view, a 9:30 AM slot looked 5+ hours in the
+# FUTURE, so the past-time filter correctly let it through - "correctly"
+# for the wrong clock. This is not a docker-config afterthought fix
+# (e.g. a compose-level TZ= var) because that would only paper over
+# whichever host happens to run this container next - HOSPITAL_TZ is
+# pinned here, in code, so "what time is it for THIS hospital" is
+# correct regardless of the underlying machine's/container's system
+# timezone. Change this one constant if the deployment ever moves to a
+# different real-world timezone.
+HOSPITAL_TZ = ZoneInfo("Asia/Karachi")
+
+
+def _local_now() -> datetime:
+    """Timezone-AWARE current time in the hospital's real timezone - see
+    HOSPITAL_TZ's comment above for the live incident this fixes. Use
+    this (or _local_today()) everywhere this file needs "right now" for
+    schedule/availability logic; only the historical `created_at` audit
+    timestamp intentionally stays UTC (timezone.utc), since that's
+    storage metadata, not a slot-time comparison."""
+    return datetime.now(HOSPITAL_TZ)
+
+
+def _local_today() -> date_cls:
+    return _local_now().date()
+
+# REAL BUG, found live 2026-07-30, not hypothetical: booking_id 8b26926b
+# was created with patient_name="Not provided" - the LLM invented that
+# literal string to satisfy the required parameter rather than actually
+# asking the caller for their name first (the docstring instruction
+# "Only call this AFTER ... getting their confirmation" was not enough
+# on its own to stop it). patient_name was previously just an unchecked
+# str - any non-empty value, including an obvious non-answer, sailed
+# straight into a permanent bookings row. Same "harden with a real code
+# check, don't just trust the prompt" pattern as MAX_TOKENS/logit_bias
+# for the reasoning-channel leak elsewhere in this codebase.
+#
+# SECOND REAL BUG, found live the SAME DAY via the tool-call logging
+# added right after the first fix: booking_id 57b6299d was created with
+# patient_name="Not provided yet" - a second call, same underlying
+# model behavior, phrased just differently enough (" yet" appended) to
+# not EXACTLY equal any string in this set, so the first version of
+# this guard (plain set membership) let it straight through. Switched
+# from "is the cleaned name exactly one of these strings" to "does the
+# cleaned name CONTAIN one of these phrases anywhere" - substring
+# containment is safe here (no real human name would ever contain
+# "not provided" or "n/a" as a substring) and catches any wording
+# variant of the same non-answer instead of playing whack-a-mole with
+# exact strings.
+# THIRD variant of the SAME bug, found live minutes after the substring
+# fix above: patient_name="not yet provided" still got booked, because
+# "yet" sits BETWEEN "not" and "provided" - a literal "not provided"
+# substring check can't see it as one contiguous phrase. Word order
+# isn't something a placeholder-detector can chase indefinitely
+# ("not provided", "not yet provided", "not currently provided", ...),
+# so instead of matching a growing list of exact phrasings, treat the
+# standalone WORD "not" as the signal - a real human name essentially
+# never contains "not" as its own word, so `\bnot\b` catches every
+# wording variant of "the caller didn't say" at once.
+_PLACEHOLDER_PHRASES = (
+    "unknown",
+    "unspecified",
+    "n/a",
+    "no name",
+    "unnamed",
+    "anonymous",
+    "tbd",
+    "pending",
+)
+_PLACEHOLDER_EXACT = {"na", "none", "caller", "patient", "test"}
+_PLACEHOLDER_WORD_RE = re.compile(r"\bnot\b")
+
+
+def _is_real_patient_name(name: Optional[str]) -> bool:
+    """False for empty/whitespace-only input and for known placeholder
+    strings/phrases a model might invent instead of asking the caller.
+    Not exhaustive by design (real names can't be validated by pattern) -
+    this only catches the "didn't even try" case, via substring
+    containment plus a standalone-word check for "not" (see the comment
+    above) rather than fragile exact-match only."""
+    if not name or not name.strip():
+        return False
+    cleaned = name.strip().lower().rstrip(".")
+    if cleaned in _PLACEHOLDER_EXACT:
+        return False
+    if _PLACEHOLDER_WORD_RE.search(cleaned):
+        return False
+    return not any(phrase in cleaned for phrase in _PLACEHOLDER_PHRASES)
 
 
 # Doctor names - MUST stay consistent with hospital_kb.py's doctor bios
@@ -145,7 +245,7 @@ def _generate_seed_slots():
     slots table is empty. An existing hospital_bookings.db is untouched;
     delete it (plus its -wal/-shm files) to force a fresh, re-dated seed.
     """
-    today = date_cls.today()
+    today = _local_today()
     d0 = str(today)
     d1 = str(today + timedelta(days=1))
     d2 = str(today + timedelta(days=2))
@@ -237,7 +337,7 @@ def _init_db():
                     AND b.time = slots.time
               )
             """,
-            (str(date_cls.today()),),
+            (str(_local_today()),),
         )
 
         # Top up if pruning (or simply enough real time passing since this
@@ -248,7 +348,7 @@ def _init_db():
         # today at module-import time, so this always inserts near-future
         # dates, never a repeat of stale ones.
         (future_count,) = conn.execute(
-            "SELECT COUNT(*) FROM slots WHERE date >= ?", (str(date_cls.today()),)
+            "SELECT COUNT(*) FROM slots WHERE date >= ?", (str(_local_today()),)
         ).fetchone()
         if future_count == 0:
             conn.executemany(
@@ -272,6 +372,49 @@ def _closest_match(name, candidates, cutoff: float = 0.72):
     return lowered[hits[0]] if hits else None
 
 
+_TITLE_WORDS = {"dr", "doctor"}
+
+
+def _name_words(name: str) -> set:
+    """Lowercase, strip punctuation, drop "Dr"/"Doctor" - so "Dr Malik",
+    "Dr. Malik", and "doctor malik" (STT rarely produces the period)
+    all normalize to the same {"malik"}."""
+    cleaned = re.sub(r"[^\w\s]", " ", name.lower())
+    return {w for w in cleaned.split() if w not in _TITLE_WORDS}
+
+
+def _match_doctor_name(name, candidates):
+    """Resolve a caller-given doctor name against the real roster. Added
+    2026-07-30 alongside check_availability's "silently accepted an
+    unknown doctor" fix (see that call site) - fixing THAT bug via plain
+    _closest_match would have caused a new regression: callers very
+    commonly say only a last name or drop "Dr."/the period ("Malik",
+    "Dr Malik"), and difflib's ratio penalizes the LENGTH difference
+    between a short query and a much longer full name enough that
+    "malik" scores well under _closest_match's 0.72 cutoff even though
+    it's an exact, unambiguous piece of "Dr. Imran Malik" - that would
+    have made a real doctor get reported as not-found too. Checked here
+    FIRST (exact string, then "every word the caller said appears in
+    this candidate's name") before falling back to _closest_match for
+    genuine typo tolerance on a (near-)full name. Returns None - never a
+    guess - if more than one candidate matches, so a non-unique last
+    name doesn't silently resolve to the wrong doctor."""
+    if not name or not candidates:
+        return None
+    query = name.strip().lower()
+    for c in candidates:
+        if c.lower() == query:
+            return c
+    query_words = _name_words(name)
+    if query_words:
+        word_hits = [c for c in candidates if query_words <= _name_words(c)]
+        if len(word_hits) == 1:
+            return word_hits[0]
+        if len(word_hits) > 1:
+            return None
+    return _closest_match(name, candidates)
+
+
 def _find_slots_sync(department, date, limit):
     """Returns None if the department doesn't exist at all, else a list of
     (doctor, date, time) rows for OPEN slots (already excludes bookings
@@ -286,7 +429,7 @@ def _find_slots_sync(department, date, limit):
         if dept_row is None:
             return None
 
-        today_str = str(date_cls.today())
+        today_str = str(_local_today())
 
         query = """
             SELECT s.doctor, s.date, s.time
@@ -310,7 +453,7 @@ def _find_slots_sync(department, date, limit):
         # be for a time that has already passed - the JOIN only knows about
         # BOOKED slots, not clock time. Use date_cls (not the `date`
         # parameter this function shadows) to get the real current date/time.
-        now_str = datetime.now().strftime("%H:%M")
+        now_str = _local_now().strftime("%H:%M")
         rows = [r for r in rows if not (r[1] == today_str and r[2] < now_str)]
 
         return rows
@@ -369,10 +512,31 @@ async def check_availability(
             + ", ".join(available_depts),
         }
 
-    if doctor and rows:
-        doc_match = _closest_match(doctor, sorted({r[0] for r in rows}))
-        if doc_match:
-            rows = [r for r in rows if r[0] == doc_match]
+    if doctor:
+        # REAL BUG, found live 2026-07-30, not hypothetical: asking for a
+        # doctor who doesn't exist in this department (e.g. "Dr. Patel"
+        # in cardiology, where the roster is only Imran Malik / Ayesha
+        # Siddiqui) used to SILENTLY return every OTHER doctor's slots
+        # in the department instead - `doc_match` came back None (no
+        # close fuzzy match), and the old code's `if doc_match:` guard
+        # meant "no match -> skip filtering entirely" rather than
+        # "no match -> say so." The agent would then read back real
+        # Malik/Siddiqui slots as if they were an answer about Patel,
+        # which is simply wrong - book_appointment already had the
+        # correct "I don't see a doctor named X" behavior for this exact
+        # case (see doctor_not_found below); check_availability now
+        # matches it instead of quietly substituting a different doctor.
+        doctors_in_dept = await asyncio.to_thread(
+            _doctors_in_department_sync, department
+        )
+        doc_match = _match_doctor_name(doctor, doctors_in_dept)
+        if doc_match is None:
+            return {
+                "status": "not_found",
+                "message": f"I don't see a doctor named '{doctor}' in {department}. "
+                f"Doctors there: {', '.join(doctors_in_dept) if doctors_in_dept else 'none listed'}.",
+            }
+        rows = [r for r in rows if r[0] == doc_match]
 
     if not rows:
         if date:
@@ -443,8 +607,8 @@ def _book_sync(patient_name, department, doctor, date, time):
         # between startups. check_availability filters these out for display,
         # but book_appointment reaches this query directly when the caller
         # names an explicit doctor, so the same guard must live here too.
-        today_str = str(date_cls.today())
-        now_str = datetime.now().strftime("%H:%M")
+        today_str = str(_local_today())
+        now_str = _local_now().strftime("%H:%M")
         if date < today_str or (date == today_str and time < now_str):
             return ("invalid", None)
 
@@ -484,6 +648,12 @@ async def book_appointment(
     slot back to the caller and getting their confirmation. If doctor is
     omitted, the first open slot matching department/date/time (any
     doctor in that department) is used."""
+    if not _is_real_patient_name(patient_name):
+        return {
+            "status": "error",
+            "message": "I don't have a real patient name yet - ask the "
+            "caller for their full name before booking anything.",
+        }
     if doctor is None:
         rows = await asyncio.to_thread(_find_slots_sync, department, date, 20)
         if rows is None:
@@ -697,8 +867,8 @@ def _reschedule_sync(booking_id, department, doctor, new_date, new_time):
             return ("invalid", None)
 
         # Same past-date/time guard as _book_sync - see its comment.
-        today_str = str(date_cls.today())
-        now_str = datetime.now().strftime("%H:%M")
+        today_str = str(_local_today())
+        now_str = _local_now().strftime("%H:%M")
         if new_date < today_str or (new_date == today_str and new_time < now_str):
             return ("invalid", None)
 
@@ -825,7 +995,7 @@ def _list_doctors_sync():
             "SELECT department, doctor, COUNT(*) AS total, "
             "SUM(CASE WHEN date >= ? THEN 1 ELSE 0 END) AS upcoming "
             "FROM slots GROUP BY department, doctor ORDER BY department, doctor",
-            (str(date_cls.today()),),
+            (str(_local_today()),),
         ).fetchall()
         return [
             {
@@ -905,8 +1075,8 @@ async def add_doctor_slots(department: str, doctor: str, slots: list) -> dict:
     # Reject past-dated slots up front instead of inserting them - a stale
     # or fat-fingered date here used to sit in the slots table forever,
     # invisible to staff, but still schedule-shaped clutter.
-    today_str = str(date_cls.today())
-    now_str = datetime.now().strftime("%H:%M")
+    today_str = str(_local_today())
+    now_str = _local_now().strftime("%H:%M")
     valid_slots = [
         (d, t) for d, t in slots if d > today_str or (d == today_str and t >= now_str)
     ]
@@ -956,8 +1126,8 @@ async def add_recurring_schedule(
     Mon/Wed/Fri 09:00-13:00 in 30-minute slots for the next 4 weeks. This is
     the main "add new doctor timings" entry point the admin UI's recurring-
     schedule form calls. weekdays are ints, Mon=0..Sun=6."""
-    anchor = date_cls.fromisoformat(start_date) if start_date else date_cls.today()
-    if anchor < date_cls.today():
+    anchor = date_cls.fromisoformat(start_date) if start_date else _local_today()
+    if anchor < _local_today():
         return {
             "status": "error",
             "message": f"start_date {anchor} is in the past - use today or later.",
@@ -1024,7 +1194,7 @@ async def self_test() -> bool:
     # Recompute the same relative dates the fresh seed just used, so the
     # self-test's assertions (which reference specific dates) line up
     # with whatever _generate_seed_slots() actually inserted this run.
-    today = date_cls.today()
+    today = _local_today()
     d0 = str(today)
     d1 = str(today + timedelta(days=1))
     d2 = str(today + timedelta(days=2))
@@ -1231,7 +1401,7 @@ async def self_test() -> bool:
     # passed the current clock time must NOT show up as available.
     # This directly encodes the 5:43 PM bug (morning slots wrongly
     # still offered) so it can never silently regress again.
-    now_str = datetime.now().strftime("%H:%M")
+    now_str = _local_now().strftime("%H:%M")
     r17 = await check_availability("general medicine", d0)
     past_today_slots = [s for s in r17["slots"] if s["time"] < now_str]
     ok17 = len(past_today_slots) == 0

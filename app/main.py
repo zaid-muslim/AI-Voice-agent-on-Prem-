@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import socket
 from urllib.parse import urlparse
 
@@ -50,17 +51,19 @@ import aiohttp
 from dotenv import load_dotenv
 from loguru import logger
 
-from livekit import agents
+from livekit import agents, rtc
 from livekit.agents import (
     Agent,
     AgentSession,
     JobContext,
     JobProcess,
+    ModelSettings,
     RoomInputOptions,
     RunContext,
     StopResponse,
     function_tool,
     inference,
+    llm,
     metrics,
 )
 from livekit.plugins import openai, silero
@@ -438,6 +441,47 @@ TURN_FILLER_PHRASES = (
     "Just a second.",
 )
 
+
+async def _prerender_filler_audio(tts_service) -> dict[str, rtc.AudioFrame]:
+    """Synthesize each TURN_FILLER_PHRASES phrase ONCE per call, with the
+    actual TTS engine/voice this call is using, so a fired filler can play
+    via session.say(audio=...) - a real frame already in memory - instead
+    of a live synthesis call. This is exactly the fix TURN_FILLER_DELAY_SECS's
+    own comment history already named as "the real fix" if ever needed:
+    with tts_service/server.py's single-lane shared TTS, a LIVE-synthesized
+    filler competes for the same lock the real reply's synthesis needs,
+    which could make the real reply's audio arrive LATER than if no filler
+    had fired at all - not "for free" the way a filler is supposed to be.
+    A pre-rendered frame has zero runtime synthesis cost, so it can never
+    do that. Confirmed as a current (2026) industry-standard technique, not
+    a one-off idea - LiveKit's own docs recommend exactly this pattern
+    (session.say(text, audio=...) with pre-synthesized audio) for "fixed
+    phrases like greetings, hold messages, and error prompts... works best
+    when the set of phrases is known and stable" - exactly this call site.
+
+    Runs at call-start (entrypoint(), alongside the other warm-ups, not
+    prewarm()) because the TTS engine/voice can differ per call (the PC2-
+    reachability fallback chain above) - prewarm() runs once per WORKER
+    process and can't know that yet. Failure is non-fatal: returns
+    whatever succeeded, and _speak_turn_filler_after_delay() falls back to
+    live synthesis for any phrase missing from the cache."""
+    cache: dict[str, rtc.AudioFrame] = {}
+    for phrase in TURN_FILLER_PHRASES:
+        try:
+            cache[phrase] = await tts_service.synthesize(phrase).collect()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                f"turn filler: pre-render failed for {phrase!r} ({exc}) - "
+                "this phrase will fall back to live synthesis if it fires."
+            )
+    return cache
+
+
+async def _single_frame_aiter(frame: rtc.AudioFrame):
+    """Wraps one pre-rendered rtc.AudioFrame as the AsyncIterable
+    session.say(audio=...) expects."""
+    yield frame
+
 # Chat context truncation - a REAL bug, not a hypothetical: found live via a
 # real call that ran long enough to hit vLLM's configured
 # --max-model-len 4096. Nothing was bounding chat history growth, so once a
@@ -464,6 +508,74 @@ TURN_FILLER_PHRASES = (
 CHAT_CTX_MAX_ITEMS = 16
 
 
+class _ThinkingChannelStreamFilter:
+    """Real bug, found live 2026-07-29 (this deployment, not a
+    hypothetical): gemma-4-12b sometimes opens a `<|channel>thought...`
+    reasoning block on its OWN initiative mid-completion, even though
+    the chat template already defaults to enable_thinking=false and
+    pre-inserts a CLOSED thought marker in the prompt specifically to
+    signal "skip thinking" - checked directly in
+    chat_templates/tool_chat_template_gemma4.jinja. Root cause is a
+    missing --reasoning-parser in scripts/run_vllm.sh /
+    docker/docker-compose.yml (confirmed: this vLLM install has ZERO
+    reasoning parsers registered,
+    vllm.reasoning.ReasoningParserManager.reasoning_parsers == {}) - a
+    shared-config fix out of scope here, same boundary as the
+    librosa/av install. Left unhandled, this leaked text gets spoken
+    aloud verbatim by TTS, and - the more serious real incident this
+    defends against - can consume the ENTIRE max_completion_tokens
+    budget on rumination with NO real answer ever generated, leaving
+    the caller in dead silence for the whole turn.
+
+    Streaming-safe (content arrives one token/fragment at a time, not
+    as one final string) - same buffering approach as
+    direct_audio_agent/llm_plugin.py's _ThinkingChannelStreamFilter,
+    reimplemented here rather than imported since app/ and
+    direct_audio_agent/ are deliberately independent (see that file's
+    README for why)."""
+
+    _OPEN = "<|channel>"
+    _CLOSE = "<channel|>"
+
+    def __init__(self) -> None:
+        self._state = "checking"  # "checking" | "stripping" | "clean"
+        self._buffer = ""
+
+    def push(self, content: str) -> str:
+        if self._state == "clean":
+            return content
+
+        self._buffer += content
+
+        if self._state == "stripping":
+            idx = self._buffer.find(self._CLOSE)
+            if idx == -1:
+                return ""
+            self._state = "clean"
+            rest = self._buffer[idx + len(self._CLOSE) :]
+            self._buffer = ""
+            return rest
+
+        if self._OPEN in self._buffer:
+            self._state = "stripping"
+            self._buffer = self._buffer.split(self._OPEN, 1)[1]
+            idx = self._buffer.find(self._CLOSE)
+            if idx == -1:
+                return ""
+            self._state = "clean"
+            rest = self._buffer[idx + len(self._CLOSE) :]
+            self._buffer = ""
+            return rest
+
+        if len(self._buffer) < len(self._OPEN) and self._OPEN.startswith(self._buffer):
+            return ""
+
+        self._state = "clean"
+        out = self._buffer
+        self._buffer = ""
+        return out
+
+
 # ---------------------------------------------------------------------------
 # The agent: persona + safety gate + tools
 # ---------------------------------------------------------------------------
@@ -473,6 +585,32 @@ class RiversideReceptionist(Agent):
         super().__init__(instructions=self._base_instructions)
         self._filler_task: asyncio.Task | None = None
         self._filler_index = 0
+        # REAL BUG, found live 2026-07-30: a caller heard a filler phrase
+        # ("Mm-hmm, one moment.") fire AFTER the real reply had already
+        # started speaking - not a timing-tuning issue, a genuine race.
+        # cancel_pending_filler() calls Task.cancel() on the armed
+        # filler task, but _speak_turn_filler_after_delay()'s only await
+        # point is the delay sleep itself - once TURN_FILLER_DELAY_SECS
+        # has genuinely elapsed, the task is no longer suspended at that
+        # await, it's already scheduled to run its post-sleep body
+        # (phrase pick + session.say(), both synchronous, no further
+        # await for a cancellation to land at). If the real reply starts
+        # "speaking" at close to the same instant the filler's own timer
+        # elapses - exactly the common case this delay was tuned for,
+        # see TURN_FILLER_DELAY_SECS's docstring - Task.cancel() can lose
+        # that race and the filler fires anyway, right on top of/just
+        # after real speech. This flag is an explicit, unambiguous
+        # backstop checked AFTER the sleep, independent of asyncio's
+        # cancellation-delivery timing: set the instant real speech
+        # starts, reset the instant a new filler is armed for the next
+        # turn.
+        self._real_reply_started = False
+        # Populated by entrypoint() right after tts_service is known, via
+        # _prerender_filler_audio() - see that function's docstring for
+        # why. None until then; _speak_turn_filler_after_delay() falls
+        # back to live synthesis if it's still None/empty when a filler
+        # actually needs to fire (e.g. pre-rendering itself failed).
+        self.filler_audio: dict[str, rtc.AudioFrame] = {}
         # Survives CHAT_CTX_MAX_ITEMS truncation - see _remember()'s
         # docstring for why this exists instead of trusting raw history.
         self._call_facts: dict[str, str] = {}
@@ -484,29 +622,129 @@ class RiversideReceptionist(Agent):
         await push_ui({"type": "status", "state": "listening"})
         self.session.generate_reply(instructions=GREETING_INSTRUCTIONS)
 
+    # ------------------------------------------------------------------ LLM
+    async def llm_node(
+        self, chat_ctx: llm.ChatContext, tools: list[llm.Tool], model_settings: ModelSettings
+    ):
+        """Wraps the default llm_node to strip leaked
+        `<|channel>thought...` content from streamed text before it can
+        reach TTS - see _ThinkingChannelStreamFilter's docstring for the
+        real incident this defends against (a caller left in dead
+        silence for an entire turn because the leak consumed the whole
+        token budget). Tool-call chunks and usage chunks pass through
+        completely unmodified - only `delta.content` is filtered.
+
+        DOES NOT also re-truncate chat_ctx here, despite a same-day
+        attempt to do exactly that. REAL BUG, found live 2026-07-30,
+        caught via the SAME test call that motivated it: truncating on
+        EVERY completion (not just once per user turn, in
+        on_user_turn_completed) did bound the mid-turn prompt-size growth
+        it was built for - but it also made LiveKit's own chat-context
+        code log "function output missing the corresponding function
+        call, ignoring" repeatedly (see
+        livekit.agents.llm._provider_format.utils.group_tool_calls /
+        _ChatItemGroup.remove_invalid_tool_calls) - ChatContext.truncate()
+        only protects against an orphaned function_call/function_call_output
+        landing at the very FRONT of the truncated window; calling it
+        this much more often, mid-tool-chain, hit that boundary far more
+        often and started silently DROPPING tool results from what the
+        LLM can see. For a booking agent, an LLM that can no longer see
+        a tool's own result is a worse failure mode than a turn running
+        a bit slower, so this reverts to the single per-turn truncation
+        point only. The mid-turn prompt growth this was chasing is real
+        (see CHAT_CTX_MAX_ITEMS's docstring) but accepted as a known,
+        lesser cost unless/until a truncation approach that's provably
+        call/output-pair-safe replaces it."""
+        stream = Agent.default.llm_node(self, chat_ctx, tools, model_settings)
+        if asyncio.iscoroutine(stream):
+            stream = await stream
+        if stream is None:
+            return
+        leak_filter = _ThinkingChannelStreamFilter()
+        # yielded_anything tracks whether ANY visible text or tool_calls
+        # made it downstream this turn. REAL INCIDENT, not hypothetical
+        # (this deployment, 2026-07-30): a turn where the model's ENTIRE
+        # completion was spent opening `<|channel>thought` and never
+        # closing it (confirmed live: completion_tokens=3, i.e. the model
+        # barely started before stopping) leaves leak_filter stuck in
+        # "stripping" forever - every push() call returns "", so this
+        # loop yields NOTHING at all. Before this fix that meant the turn
+        # ended in total silence: no TTS call, no error, no log line -
+        # indistinguishable from a hang to the caller, who has no signal
+        # to do anything but wait and eventually hang up. That's a WORSE
+        # outcome than the leaked-text-spoken-aloud case this filter was
+        # built to prevent. The fallback below guarantees the caller
+        # always hears SOMETHING instead of dead air.
+        yielded_anything = False
+        async for chunk in stream:
+            if isinstance(chunk, str):
+                visible = leak_filter.push(chunk)
+                if visible:
+                    yielded_anything = True
+                    yield visible
+                continue
+            if chunk.delta is not None and chunk.delta.content:
+                visible = leak_filter.push(chunk.delta.content)
+                if not visible and not chunk.delta.tool_calls:
+                    continue
+                chunk.delta.content = visible
+            if chunk.delta is not None and (chunk.delta.content or chunk.delta.tool_calls):
+                yielded_anything = True
+            yield chunk
+        if not yielded_anything:
+            logger.error(
+                "llm_node: entire completion swallowed by the thinking-channel "
+                "leak filter (model never closed `<|channel>thought...`) - "
+                "the turn would otherwise end in total silence. Speaking a "
+                "fallback so the caller always hears something."
+            )
+            yield "Sorry, could you say that again?"
+
     # ------------------------------------------------------------ TURN FILLER
     def cancel_pending_filler(self) -> None:
         """Called from entrypoint()'s agent_state_changed handler the
         moment real audio actually starts (whether that's this filler's
         own playback or the real reply beating it) - cancelling an
         already-fired/completed task is a harmless no-op, so this is safe
-        to call unconditionally on every "speaking" transition."""
+        to call unconditionally on every "speaking" transition. Also
+        flips _real_reply_started - see that field's docstring for the
+        real race this closes that Task.cancel() alone did not."""
+        self._real_reply_started = True
         if self._filler_task is not None and not self._filler_task.done():
             self._filler_task.cancel()
         self._filler_task = None
 
     async def _speak_turn_filler_after_delay(self) -> None:
+        self._real_reply_started = False
         logger.debug(f"turn filler: armed, sleeping {TURN_FILLER_DELAY_SECS}s")
         try:
             await asyncio.sleep(TURN_FILLER_DELAY_SECS)
         except asyncio.CancelledError:
             logger.debug("turn filler: cancelled before firing (real reply beat it)")
             return
+        if self._real_reply_started:
+            # Task.cancel() lost the race (see _real_reply_started's
+            # docstring) - the sleep completed without raising
+            # CancelledError, but real speech already started in the
+            # meantime. Bail out explicitly instead of speaking over/
+            # right after it.
+            logger.debug(
+                "turn filler: sleep completed but real reply already started "
+                "(cancel() lost the race) - not firing"
+            )
+            return
         phrase = TURN_FILLER_PHRASES[self._filler_index % len(TURN_FILLER_PHRASES)]
         self._filler_index += 1
-        logger.debug(f"turn filler: firing now - {phrase!r}")
+        frame = self.filler_audio.get(phrase)
+        logger.debug(
+            f"turn filler: firing now - {phrase!r} "
+            f"({'pre-rendered' if frame is not None else 'LIVE SYNTHESIS - pre-render missing/failed'})"
+        )
         try:
-            self.session.say(phrase, add_to_chat_ctx=False)
+            if frame is not None:
+                self.session.say(phrase, audio=_single_frame_aiter(frame), add_to_chat_ctx=False)
+            else:
+                self.session.say(phrase, add_to_chat_ctx=False)
         except TypeError:
             self.session.say(phrase)
 
@@ -629,12 +867,25 @@ class RiversideReceptionist(Agent):
             date: Optional day in YYYY-MM-DD. Omit to see all upcoming slots.
             doctor: Optional doctor name if the caller asked for one.
         """
+        # Tool-call args weren't logged anywhere before 2026-07-30 - when a
+        # caller reported "my name is Abdullah Amin" got answered with
+        # "no doctor named Abdullah Amin" (the LLM misreading a caller's
+        # self-introduction as a doctor-name lookup - see prompts.py's
+        # fix for the actual behavior change), there was no log line
+        # anywhere confirming what arguments the LLM actually passed -
+        # only the DB and the caller's own report to go on. This makes
+        # the next one directly diagnosable instead of inferred.
+        logger.info(
+            f"tool call: check_availability(department={department!r}, "
+            f"date={date!r}, doctor={doctor!r})"
+        )
         await self._remember(department=department, date=date, doctor=doctor)
         result = await run_with_filler(
             context.session,
             compat.check_availability(department=department, date=date, doctor=doctor),
             filler=DEFAULT_FILLERS["check_availability"],
         )
+        logger.info(f"tool result: check_availability -> status={result.get('status')!r}")
         if isinstance(result, dict):
             slots = _group_slots(result.get("slots") or [])
             alternatives = _group_slots(result.get("alternatives") or [])
@@ -672,6 +923,11 @@ class RiversideReceptionist(Agent):
                 character for character (e.g. "11:00" - never "11:00 AM").
             doctor: Optional specific doctor; omit to take any open doctor.
         """
+        logger.info(
+            f"tool call: book_appointment(patient_name={patient_name!r}, "
+            f"department={department!r}, date={date!r}, time={time!r}, "
+            f"doctor={doctor!r})"
+        )
         await self._remember(
             patient_name=patient_name, department=department, date=date, time=time, doctor=doctor
         )
@@ -686,6 +942,7 @@ class RiversideReceptionist(Agent):
             ),
             filler=DEFAULT_FILLERS["book_appointment"],
         )
+        logger.info(f"tool result: book_appointment -> status={result.get('status')!r}")
         if isinstance(result, dict):
             if result.get("status") == "booked":
                 await push_ui({"type": "booking", "booking": result})
@@ -719,6 +976,10 @@ class RiversideReceptionist(Agent):
             department: Optional department to narrow down.
             time: Optional time (e.g. "11:00") to narrow down.
         """
+        logger.info(
+            f"tool call: cancel_appointment(patient_name={patient_name!r}, "
+            f"date={date!r}, department={department!r}, time={time!r})"
+        )
         await self._remember(patient_name=patient_name, department=department, date=date, time=time)
         result = await run_with_filler(
             context.session,
@@ -727,6 +988,7 @@ class RiversideReceptionist(Agent):
             ),
             filler=DEFAULT_FILLERS["cancel_appointment"],
         )
+        logger.info(f"tool result: cancel_appointment -> status={result.get('status')!r}")
         if isinstance(result, dict) and result.get("status") == "cancelled":
             await push_ui({"type": "cancellation", "booking": result})
         return result
@@ -755,6 +1017,11 @@ class RiversideReceptionist(Agent):
             department: The CURRENT appointment's department, to narrow down.
             time: The CURRENT appointment's time, to narrow down.
         """
+        logger.info(
+            f"tool call: update_appointment(patient_name={patient_name!r}, "
+            f"new_date={new_date!r}, new_time={new_time!r}, date={date!r}, "
+            f"department={department!r}, time={time!r})"
+        )
         await self._remember(
             patient_name=patient_name,
             department=department,
@@ -773,6 +1040,7 @@ class RiversideReceptionist(Agent):
             ),
             filler=DEFAULT_FILLERS["update_appointment"],
         )
+        logger.info(f"tool result: update_appointment -> status={result.get('status')!r}")
         if isinstance(result, dict):
             if result.get("status") in ("booked", "updated"):
                 await push_ui({"type": "booking", "booking": result})
@@ -964,10 +1232,22 @@ async def entrypoint(ctx: JobContext) -> None:
     # (whether explicitly configured or reached via the fallback above)
     # uses its own tts_service.prewarm() method instead, since that class
     # manages its own subprocess lifecycle.
+    # filler_audio_cache: pre-rendered turn-filler phrases, alongside the
+    # other warm-ups (not blocking on them) - see _prerender_filler_audio's
+    # docstring for why this runs here (per-call, TTS engine known) rather
+    # than in prewarm() (per-worker, TTS engine not yet known).
     if isinstance(tts_service, QwenSubprocessTTS):
-        await asyncio.gather(_warm_up_vllm(served_model_name), tts_service.prewarm())
+        _, _, filler_audio_cache = await asyncio.gather(
+            _warm_up_vllm(served_model_name),
+            tts_service.prewarm(),
+            _prerender_filler_audio(tts_service),
+        )
     else:
-        await asyncio.gather(_warm_up_vllm(served_model_name), _warm_up_qwen_omni())
+        _, _, filler_audio_cache = await asyncio.gather(
+            _warm_up_vllm(served_model_name),
+            _warm_up_qwen_omni(),
+            _prerender_filler_audio(tts_service),
+        )
 
     # Semantic turn detection: the single highest-leverage latency change of
     # this whole migration. version="v1-mini" is pinned EXPLICITLY - if left
@@ -983,8 +1263,35 @@ async def entrypoint(ctx: JobContext) -> None:
     # agent still runs.
     turn_detection = None
     try:
-        turn_detection = inference.TurnDetector(version="v1-mini")
-        logger.info("Semantic turn detector: ENABLED (local, v1-mini).")
+        # unlikely_threshold={"en": 0.15} - TUNED 2026-07-30, down from
+        # 0.22 (2026-07-29), itself down from the shipped default (0.36
+        # for English, confirmed by reading
+        # livekit.agents.inference.eot.languages.LOCAL_LANGUAGES directly).
+        # REAL DATA, not a guess: a real call on 2026-07-29 (room
+        # reception-46069e5e) hit the FULL 2.5s max_delay ceiling on 3 of
+        # 4 turns - end_of_utterance_delay was the single largest latency
+        # contributor anywhere in the pipeline that call, dwarfing
+        # STT/LLM/TTS combined (all of which stayed under ~0.85s). The
+        # turn detector is a binary confident/uncertain classifier - when
+        # uncertain, it ALWAYS pays the full max_delay, not a graded wait
+        # - so a lower threshold means fewer turns get classified
+        # "uncertain" in the first place. Paired with max_delay 1.5 -> 0.8
+        # below to also bound the worst case when one still is.
+        # TRADE-OFF, not a free win, and pushed further deliberately on
+        # 2026-07-30: makes the agent more willing to jump in - a
+        # genuinely slow/thinking-pause caller is more likely to get
+        # interrupted than under 0.22/1.5, and more likely still than the
+        # original 0.36/2.5. Chosen because raw responsiveness mattered
+        # more than interruption risk for this deployment - re-tune back
+        # up if real calls start showing the agent cutting callers off
+        # mid-thought.
+        turn_detection = inference.TurnDetector(
+            version="v1-mini", unlikely_threshold={"en": 0.15}
+        )
+        logger.info(
+            "Semantic turn detector: ENABLED (local, v1-mini, tuned: "
+            "unlikely_threshold[en]=0.15, see comment above)."
+        )
     except Exception as exc:  # noqa: BLE001
         # Most common cause: `python agent.py download-files` was never run
         # (or ran before this plugin was registered), so the model files
@@ -1003,6 +1310,42 @@ async def entrypoint(ctx: JobContext) -> None:
             model=served_model_name,
             base_url=VLLM_BASE_URL,
             api_key="not-needed",  # vLLM ignores it; the plugin requires one
+            # REAL BUG FOUND 2026-07-29, not hypothetical: MAX_TOKENS (above)
+            # was defined and read from the env but never actually passed
+            # here - every completion was UNBOUNDED. Confirmed as the real
+            # cause of a live "it just stops, caller hangs up" incident:
+            # vLLM logged 200 OK for the request (it was accepted and
+            # streaming started), but no LLM metrics or TTS ever followed -
+            # consistent with generation running far longer than a normal
+            # reply (thousands of tokens rather than tens) before the
+            # caller gave up, not a crash or hang in the usual sense. This
+            # is a real risk independent of the short-opener prompt change
+            # made the same day - the leaked thinking-channel repetition
+            # bug (accountability history, gemma-4-12b's tool-offered-
+            # but-not-called quirk) is exactly the kind of degenerate
+            # output that would run away without a cap.
+            max_completion_tokens=MAX_TOKENS,
+            # THE REAL FIX for the reasoning-channel bug, found 2026-07-29
+            # by testing (not guessing): gemma-4-12b's `<|channel>` token
+            # (confirmed via the model's own tokenizer: a SINGLE token,
+            # id 100) opens a "thought" block the model sometimes enters
+            # on its own initiative and then, in a real fraction of
+            # cases, never exits - burning the ENTIRE max_completion_tokens
+            # budget on rumination with zero real content produced (the
+            # exact cause of the live "caller hears nothing, hangs up"
+            # incident). Verified two things directly against this
+            # server before deploying: (1) temperature=0 (greedy) hits
+            # this runaway 12/12 times, always the same ~518 characters
+            # of reasoning - it's the model's DEFAULT path, not rare bad
+            # luck; (2) banning token 100 via logit_bias eliminates it
+            # completely (0/16 true failures vs baseline's 4/16, or 25%)
+            # and makes every reply ~4x faster on average (0.33s vs
+            # 1.35s), with normal replies and tool-calling both verified
+            # still working correctly. _ThinkingChannelStreamFilter
+            # (llm_node override, above) stays in place as defense in
+            # depth for any leak this doesn't fully suppress - it's now
+            # a backstop, not the primary fix.
+            extra_body={"logit_bias": {"100": -100}},
         ),
         tts=tts_service,
         # Non-deprecated shape (replaces the old turn_detection=/
@@ -1016,21 +1359,30 @@ async def entrypoint(ctx: JobContext) -> None:
             # delay - faster average turnaround for a normal-cadence
             # caller.
             #
-            # max_delay=2.5 (not the originally-tried 6.0): 6.0 was a
-            # deliberate but UNTESTED choice ("give a caller reciting a
-            # date room to pause"). A real call surfaced the real cost:
-            # HALF of that call's turns hit the full 6.0s ceiling before
-            # the agent even started processing - a 6-second silent gap
-            # that reads as broken, not patient, dwarfing every other
-            # latency fix in this file. 2.5s is LiveKit's own documented
-            # default max_delay for dynamic endpointing with a streaming
-            # turn detector (this exact configuration) - not a guess,
-            # the vendor's own tuned value for this mode - and directly
-            # addresses what was actually observed. min_delay stays 0.1
-            # (below the framework's own 0.3 default): nothing in the
-            # real call data implicated fast/confident turns as a
-            # problem, so there's no evidence for raising it.
-            "endpointing": {"mode": "dynamic", "min_delay": 0.1, "max_delay": 2.5},
+            # max_delay=0.8 (down from 1.5 on 2026-07-29, itself down
+            # from 2.5, itself down from an originally untested 6.0 - see
+            # the history below). 2.5 was "LiveKit's own documented
+            # default for this mode," but a real call on 2026-07-29
+            # showed that default still isn't good enough for THIS
+            # deployment: 3 of 4 turns hit the full 2.5s ceiling - see
+            # the turn_detection comment above for the real numbers. 0.8s
+            # bounds the worst case much further still, deliberately
+            # prioritizing responsiveness over caller think-time on
+            # 2026-07-30 - re-tune back up toward 1.5 if real calls start
+            # showing the agent cutting callers off mid-thought. min_delay
+            # stays 0.1: Whisper's own STT latency (~0.1-0.22s measured,
+            # see direct_audio_agent/benchmark.py) is comfortably under
+            # it, so - unlike direct_audio_agent's GemmaDirectAudioSTT,
+            # which genuinely needed min_delay raised - nothing here
+            # implicates min_delay as a problem for THIS STT engine.
+            #
+            # History: 6.0 was a deliberate but UNTESTED choice ("give a
+            # caller reciting a date room to pause"). A real call
+            # surfaced the real cost: HALF of that call's turns hit the
+            # full 6.0s ceiling before the agent even started processing
+            # - a 6-second silent gap that reads as broken, not patient,
+            # dwarfing every other latency fix in this file at the time.
+            "endpointing": {"mode": "dynamic", "min_delay": 0.1, "max_delay": 0.8},
             # Explicit, not just inherited: start LLM inference on stable
             # partial STT text before end-of-turn is even confirmed.
             # preemptive_tts stays False - speculatively running TTS too
@@ -1081,6 +1433,11 @@ async def entrypoint(ctx: JobContext) -> None:
     ctx.add_shutdown_callback(_log_usage)
 
     agent = RiversideReceptionist()
+    agent.filler_audio = filler_audio_cache
+    logger.info(
+        f"turn filler: pre-rendered {len(filler_audio_cache)}/{len(TURN_FILLER_PHRASES)} "
+        "phrases for this call."
+    )
 
     # Cancels the turn-level filler (see TURN_FILLER_DELAY_SECS above) the
     # moment real audio actually starts - "speaking" fires both for the

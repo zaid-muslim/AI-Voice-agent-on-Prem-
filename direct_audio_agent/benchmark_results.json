@@ -1,0 +1,266 @@
+[
+  {
+    "utterance": "short_command",
+    "ground_truth": "Cancel my appointment please.",
+    "cascade": {
+      "stt_stage": {
+        "n": 5,
+        "mean_ms": 96.6,
+        "p50_ms": 95.6,
+        "min_ms": 94.0,
+        "max_ms": 102.5
+      },
+      "llm_stage": {
+        "n": 5,
+        "mean_ms": 388.4,
+        "p50_ms": 361.8,
+        "min_ms": 315.4,
+        "max_ms": 476.8
+      },
+      "total": {
+        "n": 5,
+        "mean_ms": 485.0,
+        "p50_ms": 455.8,
+        "min_ms": 409.9,
+        "max_ms": 572.3
+      },
+      "transcript": "Cancel my appointment please.",
+      "reply": "I can certainly help you with that. May I have your full name and your date of birth to locate your appointment?",
+      "word_overlap": 1.0
+    },
+    "direct_audio_stt": {
+      "stt_stage": {
+        "n": 5,
+        "mean_ms": 119.7,
+        "p50_ms": 115.9,
+        "min_ms": 113.1,
+        "max_ms": 128.3
+      },
+      "llm_stage": {
+        "n": 5,
+        "mean_ms": 345.4,
+        "p50_ms": 343.5,
+        "min_ms": 306.1,
+        "max_ms": 423.4
+      },
+      "total": {
+        "n": 5,
+        "mean_ms": 465.2,
+        "p50_ms": 469.0,
+        "min_ms": 419.2,
+        "max_ms": 539.2
+      },
+      "transcript": "Cancel my appointment please.",
+      "reply": "I can certainly help with that. May I have your full name and date of birth, please?",
+      "word_overlap": 1.0
+    },
+    "direct_audio_single_call": {
+      "total": {
+        "n": 5,
+        "mean_ms": 316.6,
+        "p50_ms": 313.1,
+        "min_ms": 310.9,
+        "max_ms": 323.7
+      },
+      "reply": "I can certainly help with that. May I have your full name and your date of birth, please?"
+    }
+  },
+  {
+    "utterance": "long_sentence",
+    "ground_truth": "I would like to book an appointment with cardiology for tomorrow morning.",
+    "cascade": {
+      "stt_stage": {
+        "n": 5,
+        "mean_ms": 102.6,
+        "p50_ms": 100.5,
+        "min_ms": 98.3,
+        "max_ms": 109.1
+      },
+      "llm_stage": {
+        "n": 5,
+        "mean_ms": 454.3,
+        "p50_ms": 452.3,
+        "min_ms": 424.7,
+        "max_ms": 482.1
+      },
+      "total": {
+        "n": 5,
+        "mean_ms": 556.9,
+        "p50_ms": 561.4,
+        "min_ms": 529.5,
+        "max_ms": 580.4
+      },
+      "transcript": "I would like to book an appointment with cardiology for tomorrow morning.",
+      "reply": "I can certainly help with that. May I have your full name and date of birth, please? I will check the first available opening for tomorrow morning.",
+      "word_overlap": 1.0
+    },
+    "direct_audio_stt": {
+      "stt_stage": {
+        "n": 5,
+        "mean_ms": 221.4,
+        "p50_ms": 220.7,
+        "min_ms": 219.7,
+        "max_ms": 224.7
+      },
+      "llm_stage": {
+        "n": 5,
+        "mean_ms": 419.9,
+        "p50_ms": 453.9,
+        "min_ms": 315.1,
+        "max_ms": 463.9
+      },
+      "total": {
+        "n": 5,
+        "mean_ms": 641.3,
+        "p50_ms": 674.7,
+        "min_ms": 534.8,
+        "max_ms": 685.6
+      },
+      "transcript": "I would like to book an appointment with cardiology for tomorrow morning.",
+      "reply": "I can certainly help with that. Let me check the cardiologist's availability for tomorrow morning. May I have your full name and date of birth, please?",
+      "word_overlap": 1.0
+    },
+    "direct_audio_single_call": {
+      "total": {
+        "n": 5,
+        "mean_ms": 375.7,
+        "p50_ms": 353.5,
+        "min_ms": 317.6,
+        "max_ms": 437.4
+      },
+      "reply": "I can certainly help you with that. Have you seen a specialist before, and what symptoms are you experiencing?"
+    }
+  },
+  {
+    "utterance": "name_heavy",
+    "ground_truth": "My name is Muhammad Abdullah and I was born on March third nineteen ninety eight.",
+    "cascade": {
+      "stt_stage": {
+        "n": 5,
+        "mean_ms": 112.1,
+        "p50_ms": 106.9,
+        "min_ms": 103.1,
+        "max_ms": 135.6
+      },
+      "llm_stage": {
+        "n": 5,
+        "mean_ms": 326.0,
+        "p50_ms": 321.5,
+        "min_ms": 307.4,
+        "max_ms": 354.1
+      },
+      "total": {
+        "n": 5,
+        "mean_ms": 438.1,
+        "p50_ms": 433.1,
+        "min_ms": 410.4,
+        "max_ms": 463.8
+      },
+      "transcript": "My name is Muhammad Abdelah, and I was born on March 3, 1998.",
+      "reply": "Hello, Mr. Abdelah. Thank you for providing that information. How can I help you today?",
+      "word_overlap": 0.67
+    },
+    "direct_audio_stt": {
+      "stt_stage": {
+        "n": 5,
+        "mean_ms": 334.6,
+        "p50_ms": 337.6,
+        "min_ms": 319.8,
+        "max_ms": 350.7
+      },
+      "llm_stage": {
+        "n": 5,
+        "mean_ms": 296.7,
+        "p50_ms": 305.7,
+        "min_ms": 241.0,
+        "max_ms": 373.1
+      },
+      "total": {
+        "n": 5,
+        "mean_ms": 631.2,
+        "p50_ms": 625.5,
+        "min_ms": 569.4,
+        "max_ms": 710.6
+      },
+      "transcript": "My name is Muhammad Abdullah and I was born on March 3, 1998.",
+      "reply": "Hello, Mr. Abdullah. Thank you for providing those details. How can I help you today?",
+      "word_overlap": 0.73
+    },
+    "direct_audio_single_call": {
+      "total": {
+        "n": 5,
+        "mean_ms": 222.4,
+        "p50_ms": 222.7,
+        "min_ms": 211.6,
+        "max_ms": 231.9
+      },
+      "reply": "Hello, Mr. Abdullah. How can I assist you today?"
+    }
+  },
+  {
+    "utterance": "general_question",
+    "ground_truth": "What time does the hospital open on Saturdays and is parking available.",
+    "cascade": {
+      "stt_stage": {
+        "n": 5,
+        "mean_ms": 104.5,
+        "p50_ms": 103.7,
+        "min_ms": 101.3,
+        "max_ms": 110.1
+      },
+      "llm_stage": {
+        "n": 5,
+        "mean_ms": 426.7,
+        "p50_ms": 420.3,
+        "min_ms": 390.6,
+        "max_ms": 487.1
+      },
+      "total": {
+        "n": 5,
+        "mean_ms": 531.2,
+        "p50_ms": 521.7,
+        "min_ms": 497.9,
+        "max_ms": 592.4
+      },
+      "transcript": "What time does the hospital open on Saturdays and is parking available?",
+      "reply": "We are open 24 hours a day, including Saturdays. Yes, we have on-site parking available for patients and visitors.",
+      "word_overlap": 1.0
+    },
+    "direct_audio_stt": {
+      "stt_stage": {
+        "n": 5,
+        "mean_ms": 225.5,
+        "p50_ms": 222.8,
+        "min_ms": 218.3,
+        "max_ms": 237.9
+      },
+      "llm_stage": {
+        "n": 5,
+        "mean_ms": 414.7,
+        "p50_ms": 407.7,
+        "min_ms": 392.6,
+        "max_ms": 456.7
+      },
+      "total": {
+        "n": 5,
+        "mean_ms": 640.2,
+        "p50_ms": 626.1,
+        "min_ms": 617.1,
+        "max_ms": 678.6
+      },
+      "transcript": "What time does the hospital open on Saturdays and is parking available?",
+      "reply": "Hello! We are open 24 hours a day, 7 days a week. Yes, we have on-site parking available for patients and visitors.",
+      "word_overlap": 1.0
+    },
+    "direct_audio_single_call": {
+      "total": {
+        "n": 5,
+        "mean_ms": 384.8,
+        "p50_ms": 364.6,
+        "min_ms": 342.2,
+        "max_ms": 474.8
+      },
+      "reply": "Our hospital opens at 7:00 AM on Saturdays. Yes, on-site parking is available for all visitors."
+    }
+  }
+]

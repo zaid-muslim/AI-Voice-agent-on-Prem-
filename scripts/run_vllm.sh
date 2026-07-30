@@ -121,15 +121,34 @@
 #      evidence to dial --gpu-memory-utilization back up slightly (fewer
 #      concurrent callers) rather than risk an OOM mid-call.
 
+# 6. --max-model-len 8192 -> 16384, --gpu-memory-utilization 0.50 -> 0.65
+#    (2026-07-29, requested headroom for longer calls, not a bug fix)
+#    Doubling max-model-len alone would have been a REGRESSION: at 0.50
+#    util the KV cache pool is fixed at ~13,071 tokens total (measured
+#    from vLLM's own "GPU KV cache size" startup log), so simply raising
+#    max_model_len to 16384 without more memory would drop worst-case
+#    concurrency to 13071/16384 ~= 0.8x - not even ONE full-length
+#    request would fit. Raised --gpu-memory-utilization to 0.65
+#    alongside it so the KV cache pool grows too (measured after
+#    restart: see this file's own startup log for the real numbers -
+#    don't trust this comment's arithmetic over it).
+#    HONEST TRADEOFF: the extra ~3.5GB this reserves for vLLM comes out
+#    of the same 24GB card the direct_audio_agent/README.md-documented
+#    STT/TTS/direct-audio callers share (each measured ~4.6GB marginal
+#    cost per caller, per change #1 above) - less slack for concurrent
+#    callers than before. Real conversations run ~1800-2300 prompt
+#    tokens (nowhere near 16384), so this is headroom for occasional
+#    long calls, not an expected common case - watch nvidia-smi under
+#    real concurrent load before assuming this is free.
 VLLM_ATTENTION_BACKEND=TRITON_ATTN vllm serve \
     /home/nauyan/voice-agent-pipeline/models/gemma-4-12b-w4a16 \
     --served-model-name gemma-4-12b \
     --host 0.0.0.0 \
     --port 8000 \
-    --max-model-len 8192 \
+    --max-model-len 16384 \
     --limit-mm-per-prompt '{"audio": 1}' \
     --max-num-seqs 4 \
-    --gpu-memory-utilization 0.50 \
+    --gpu-memory-utilization 0.65 \
     --kv-cache-dtype bfloat16 \
     --generation-config vllm \
     --disable-log-stats \

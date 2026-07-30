@@ -41,15 +41,17 @@ services:
       - ../chat_templates:/chat_templates:ro
       - vllm-hf-cache:/root/.cache/huggingface
     # Same flags as scripts/run_vllm.sh - see that file's comments for the
-    # full GPU-memory-budget reasoning behind each value on a 24GB card.
+    # full GPU-memory-budget reasoning behind each value on a 24GB card,
+    # including change #6 (2026-07-29) for why max-model-len and the
+    # default util below were raised together, not independently.
     command: >
       --model /models/gemma-4-12b-w4a16
       --served-model-name gemma-4-12b
       --host 0.0.0.0 --port 8000
-      --max-model-len 8192
+      --max-model-len 16384
       --limit-mm-per-prompt '{"audio": 1}'
       --max-num-seqs 4
-      --gpu-memory-utilization ${VLLM_GPU_MEM_UTIL:-0.50}
+      --gpu-memory-utilization ${VLLM_GPU_MEM_UTIL:-0.65}
       --kv-cache-dtype bfloat16
       --generation-config vllm
       --disable-log-stats
@@ -66,11 +68,17 @@ services:
       start_period: 120s
     restart: unless-stopped
 
+  # Profile "cascade" - only the Whisper+LLM pipeline needs this; the
+  # direct-audio pipeline talks to Gemma directly and never calls this
+  # service at all. Not started when you bring up "direct-audio" alone -
+  # see the profile note on `agent` below for the real contention this
+  # fixes.
   stt-service:
     build:
       context: ..
       dockerfile: docker/stt.Dockerfile
     <<: *gpu
+    profiles: ["cascade"]
     environment:
       - STT_MODEL=${STT_MODEL:-distil-large-v3}
       - STT_NUM_WORKERS=${STT_NUM_WORKERS:-4}
@@ -111,11 +119,22 @@ services:
       start_period: 60s
     restart: unless-stopped
 
+  # Profile "cascade" - the existing Whisper+LLM worker. Deliberately
+  # NOT started by a bare `docker compose up` anymore, and deliberately
+  # NOT bundled with `direct-audio-agent` under the same profile:
+  # measured directly (2026-07-29) that running both workers at once on
+  # this GPU causes real contention - Silero VAD logged "inference is
+  # slower than realtime" (delay up to 0.52s) with the card at 86%
+  # memory used, each worker paying its own VAD/RAG-embedder overhead
+  # for no benefit if you only intend to test one pipeline at a time.
+  # Bring this one up with:
+  #   docker compose -f docker/docker-compose.yml --profile cascade up -d --build
   agent:
     build:
       context: ..
       dockerfile: docker/app.Dockerfile
     <<: *gpu
+    profiles: ["cascade"]
     command: ["python3", "main.py", "start"]
     env_file:
       - ../app/.env
@@ -139,10 +158,14 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # Profile "cascade" - the caller-facing entry point for the Whisper
+  # pipeline specifically (mints tokens that auto-dispatch to `agent`,
+  # which only exists under this same profile).
   token-server:
     build:
       context: ..
       dockerfile: docker/app.Dockerfile
+    profiles: ["cascade"]
     command: ["uvicorn", "token_server:app", "--host", "0.0.0.0", "--port", "7860"]
     env_file:
       - ../app/.env
@@ -176,6 +199,68 @@ services:
       - ../app/.env
     ports:
       - "7871:7871"
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------
+  # Direct-audio pipeline (direct_audio_agent/) - a SEPARATE LiveKit
+  # worker + its own call server, under profile "direct-audio". Talks to
+  # the SAME vllm/livekit-server containers, reuses RiversideReceptionist
+  # (persona/tools/safety-gate) from app/ read-only - see
+  # direct_audio_agent/README.md for the full architecture.
+  #
+  # DELIBERATELY its own profile, not bundled with `agent`'s "cascade"
+  # profile and not started by a bare `docker compose up`: explicit
+  # LiveKit dispatch (agent_name) already makes it SAFE to run both
+  # workers at once (neither can steal the other's room), but "safe"
+  # isn't "free" - measured directly (2026-07-29) that running both GPU
+  # worker processes simultaneously causes real contention (Silero VAD
+  # fell behind realtime, GPU memory at 86%). Pick one:
+  #   docker compose -f docker/docker-compose.yml --profile cascade up -d --build
+  #   docker compose -f docker/docker-compose.yml --profile direct-audio up -d --build
+  # Both at once still works if you genuinely want that (e.g. a beefier
+  # GPU) - just pass both profile flags.
+  direct-audio-agent:
+    build:
+      context: ..
+      dockerfile: docker/direct-audio.Dockerfile
+    <<: *gpu
+    profiles: ["direct-audio"]
+    command: ["python3", "agent.py", "start"]
+    env_file:
+      - ../app/.env
+    environment:
+      - VLLM_BASE_URL=http://vllm:8000/v1
+      - SHARED_TTS_BASE_URL=http://tts-service:8021
+      - LIVEKIT_URL=ws://livekit-server:7880
+    volumes:
+      - ../app/hospital_core:/srv/app/hospital_core
+    depends_on:
+      livekit-server:
+        condition: service_started
+      vllm:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Lets you actually CALL the direct-audio agent from a browser - mints
+  # tokens with EXPLICIT dispatch to direct-audio-agent (agent_name=
+  # "direct-audio-receptionist"), so it can never collide with
+  # token-server's auto-dispatched tokens for the existing pipeline.
+  # Same frontend/index.html, different port: whisper/cascade is :7860,
+  # direct-audio is :7862.
+  direct-audio-call-server:
+    build:
+      context: ..
+      dockerfile: docker/direct-audio.Dockerfile
+    profiles: ["direct-audio"]
+    command: ["python3", "call_server.py"]
+    env_file:
+      - ../app/.env
+    environment:
+      - LIVEKIT_URL=ws://livekit-server:7880
+    ports:
+      - "7862:7862"
+    depends_on:
+      - livekit-server
     restart: unless-stopped
 
 volumes:

@@ -221,7 +221,11 @@ def _fb_open_slots(
     )
     doctors = _fb_doctors_in(dept_key)
     if doctor:
-        doctors = [n for n in doctors if doctor.lower() in n.lower()] or doctors
+        # Same class of bug as the real booking.py's check_availability
+        # (fixed 2026-07-30): a non-matching doctor name must NOT
+        # silently fall back to every doctor in the department - that
+        # reads as confirming a doctor who was never actually found.
+        doctors = [n for n in doctors if doctor.lower() in n.lower()]
     out = []
     for d in days:
         for name in doctors:
@@ -252,6 +256,16 @@ async def check_availability(
             + ", ".join(_FALLBACK_DEPARTMENTS),
         }
 
+    if doctor and not any(
+        doctor.lower() in n.lower() for n in _fb_doctors_in(dept_key)
+    ):
+        doctors_here = _fb_doctors_in(dept_key)
+        return {
+            "status": "not_found",
+            "message": f"I don't see a doctor named '{doctor}' in {dept_key}. "
+            f"Doctors there: {', '.join(doctors_here) if doctors_here else 'none listed'}.",
+        }
+
     day = _fb_normalize_date(date)
     async with _demo_lock:
         slots = _fb_open_slots(dept_key, day, doctor)[:20]
@@ -276,6 +290,33 @@ async def check_availability(
     }
 
 
+_PLACEHOLDER_PHRASES = (
+    "unknown", "unspecified", "n/a", "no name", "unnamed", "anonymous",
+    "tbd", "pending",
+)
+_PLACEHOLDER_EXACT = {"na", "none", "caller", "patient", "test"}
+_PLACEHOLDER_WORD_RE = re.compile(r"\bnot\b")
+
+
+def _is_real_patient_name(name: Optional[str]) -> bool:
+    """Same placeholder-name guard as hospital_core/booking.py's real
+    book_appointment - substring containment plus a standalone-word
+    check for "not" (catches "not provided", "not yet provided", "not
+    currently provided", every wording variant at once - see that
+    file's comment for why word order broke a plain substring check) -
+    kept here too so this demo fallback can't persist a booking under
+    an invented name either, if booking.py is ever removed and this
+    path becomes live."""
+    if not name or not name.strip():
+        return False
+    cleaned = name.strip().lower().rstrip(".")
+    if cleaned in _PLACEHOLDER_EXACT:
+        return False
+    if _PLACEHOLDER_WORD_RE.search(cleaned):
+        return False
+    return not any(phrase in cleaned for phrase in _PLACEHOLDER_PHRASES)
+
+
 async def book_appointment(
     patient_name: str,
     department: str,
@@ -283,6 +324,12 @@ async def book_appointment(
     time: str,
     doctor: Optional[str] = None,
 ) -> dict:
+    if not _is_real_patient_name(patient_name):
+        return {
+            "status": "error",
+            "message": "I don't have a real patient name yet - ask the "
+            "caller for their full name before booking anything.",
+        }
     if _booking is not None and hasattr(_booking, "book_appointment"):
         return await _call(
             _booking.book_appointment,

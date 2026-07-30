@@ -22,6 +22,7 @@ import asyncio
 import base64
 import json
 import os
+import uuid
 
 import aiohttp
 from livekit.agents import APIConnectionError, APIConnectOptions, DEFAULT_API_CONNECT_OPTIONS, tts
@@ -150,8 +151,20 @@ class _SharedQwenChunkedStream(tts.ChunkedStream):
                     if "audio_b64" in data:
                         if not initialized:
                             initialized = True
+                            # Log-noise fix, found live 2026-07-30: this
+                            # relied on an `x-request-id` response header
+                            # that tts_service/server.py never actually
+                            # sends, so every single synthesis call
+                            # logged "no request_id provided for TTS
+                            # plugins.shared_qwen_tts.SharedQwenTTS" -
+                            # harmless but drowned out real warnings in
+                            # a busy call's logs. Generated client-side
+                            # instead of depending on a server header
+                            # that was never going to arrive.
                             output_emitter.initialize(
-                                request_id=resp.headers.get("x-request-id", ""),
+                                request_id=resp.headers.get(
+                                    "x-request-id"
+                                ) or uuid.uuid4().hex,
                                 sample_rate=data.get("sample_rate", DEFAULT_SAMPLE_RATE),
                                 num_channels=1,
                                 mime_type="audio/pcm",
