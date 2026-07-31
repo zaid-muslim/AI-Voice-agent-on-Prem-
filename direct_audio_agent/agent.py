@@ -58,6 +58,8 @@ import os
 import sys
 from pathlib import Path
 
+import numpy as np
+
 THIS_DIR = Path(__file__).resolve().parent
 APP_DIR = THIS_DIR.parent / "app"
 sys.path.insert(0, str(THIS_DIR))
@@ -87,8 +89,49 @@ from plugins.qwen_tts import QwenSubprocessTTS  # noqa: E402 - app/plugins, unmo
 
 from stt_plugin import GemmaDirectAudioSTT  # this folder's own module
 from llm_plugin import GemmaDirectAudioLLM  # this folder's own module
+import gemma_audio_client as gac  # this folder's own module
 
 AGENT_NAME = "direct-audio-receptionist"
+
+# direct-audio-only override of app/main.py's TURN_FILLER_DELAY_SECS (1.0s):
+# that constant was tuned for the CASCADE pipeline, where most non-tool
+# turns finish speaking in well under a second (see its docstring in
+# main.py). This pipeline's own per-turn floor is already ~1.7-2.5s even
+# for trivial replies - min_delay=0.7 + ~0.55s STT + LLM ttft + TTS ttfb
+# (measured live 2026-07-31: TTS first-chunk time balloons from an
+# isolated ~250ms to ~0.85-1.2s while vLLM is concurrently decoding on
+# the same shared GPU) - so the 1.0s threshold fired on almost every
+# turn, including plain small talk, playing a randomly-picked filler
+# phrase ("Let me check that for you") that has nothing to do with what
+# was actually said. Raised so it only covers genuinely slow
+# (tool-calling) turns, same intent as the original tuning, just
+# recalibrated for this pipeline's higher floor. Patches the module
+# global directly (not a copy) - _speak_turn_filler_after_delay in
+# main.py reads TURN_FILLER_DELAY_SECS by name at call time, so this
+# takes effect without forking any of RiversideReceptionist's logic.
+riverside_main.TURN_FILLER_DELAY_SECS = 2.2
+
+
+async def _warm_up_gemma_audio_path(model: str) -> None:
+    """_warm_up_vllm() below only sends a text-only 'ping' completion -
+    it never exercises vLLM's audio-conditioned code path (the mm
+    processor / audio embedding projector), which is ALL this pipeline's
+    real turns use. Measured live (2026-07-31): the first real turn after
+    a fresh start paid ~1.18s llm_ttft vs ~0.1-0.5s on every turn after -
+    consistent with that first call also paying for CUDA kernel
+    autotuning specific to the audio path, on top of ordinary inference
+    time. One throwaway transcribe_audio() call on ~0.2s of silence,
+    fired in parallel with _warm_up_vllm(), pays that cost here instead
+    of on a real caller's first turn."""
+    silence = np.zeros(int(0.2 * gac.SAMPLE_RATE), dtype=np.int16)
+    wav_bytes = gac.pcm16_to_wav_bytes(silence, sample_rate=gac.SAMPLE_RATE)
+    try:
+        async with gac.GemmaAudioClient(
+            base_url=riverside_main.VLLM_BASE_URL, model=model
+        ) as client:
+            await client.transcribe_audio(wav_bytes, max_tokens=4)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"direct-audio agent: audio-path warm-up failed (continuing): {exc}")
 
 
 def prewarm(proc: JobProcess) -> None:
@@ -97,8 +140,10 @@ def prewarm(proc: JobProcess) -> None:
     shared vLLM server IS the warm state, and entrypoint() below pings it
     via riverside_main._warm_up_vllm same as app/main.py does). VAD is
     still needed for turn segmentation - identical Silero setup."""
+    # 0.25s, not app/main.py's 0.4s default: tightened for snappier
+    # end-of-speech detection on this pipeline specifically (2026-07-31).
     proc.userdata["vad"] = silero.VAD.load(
-        min_silence_duration=float(os.environ.get("VAD_MIN_SILENCE", "0.4"))
+        min_silence_duration=float(os.environ.get("VAD_MIN_SILENCE", "0.25"))
     )
     proc.userdata["qwen_omni_reachable"] = riverside_main._qwen_omni_reachable(
         riverside_main.QWEN_OMNI_BASE_URL
@@ -139,11 +184,14 @@ async def entrypoint(ctx: JobContext) -> None:
 
     if isinstance(tts_service, QwenSubprocessTTS):
         await asyncio.gather(
-            riverside_main._warm_up_vllm(served_model_name), tts_service.prewarm()
+            riverside_main._warm_up_vllm(served_model_name),
+            _warm_up_gemma_audio_path(served_model_name),
+            tts_service.prewarm(),
         )
     else:
         await asyncio.gather(
             riverside_main._warm_up_vllm(served_model_name),
+            _warm_up_gemma_audio_path(served_model_name),
             riverside_main._warm_up_qwen_omni(),
         )
 
@@ -166,12 +214,17 @@ async def entrypoint(ctx: JobContext) -> None:
         # now more likely to get cut off than under app/main.py's more
         # conservative values. NOT YET VALIDATED against a second real
         # call - see the README's tracking note for what to check next.
+        # 0.15, not 0.22 (2026-07-31 second pass): pushed lower again for
+        # quicker, quieter turn-taking. Same trade-off as before, just
+        # further along it - fewer utterances classified "uncertain" means
+        # fewer turns pay any wait at all, but a genuinely slow/thinking
+        # speaker is correspondingly more likely to get cut off.
         turn_detection = inference.TurnDetector(
-            version="v1-mini", unlikely_threshold={"en": 0.22}
+            version="v1-mini", unlikely_threshold={"en": 0.15}
         )
         logger.info(
             "direct-audio agent: semantic turn detector ENABLED (v1-mini, "
-            "tuned: unlikely_threshold[en]=0.22, see agent.py comments)."
+            "tuned: unlikely_threshold[en]=0.15, see agent.py comments)."
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
@@ -224,9 +277,14 @@ async def entrypoint(ctx: JobContext) -> None:
         # non-streaming call per turn) - left enabled only for parity
         # with app/main.py, not because it does anything in this
         # pipeline.
+        # max_delay tightened again 1.5 -> 0.9 (2026-07-31) for a quieter,
+        # more responsive turn ceiling. min_delay stays at 0.7 - that
+        # floor is load-bearing (see comment above: GemmaDirectAudioSTT
+        # measured 0.18-0.66s, so anything lower risks a VAD-committed
+        # turn racing ahead of the safety-gate transcript).
         turn_handling={
             "turn_detection": turn_detection,
-            "endpointing": {"mode": "dynamic", "min_delay": 0.7, "max_delay": 1.5},
+            "endpointing": {"mode": "dynamic", "min_delay": 0.7, "max_delay": 0.9},
             "preemptive_generation": {"enabled": True, "preemptive_tts": False},
         },
     )
