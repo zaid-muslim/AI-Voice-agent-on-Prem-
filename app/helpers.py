@@ -28,11 +28,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from typing import Any, Awaitable
-
-from loguru import logger
+from collections.abc import Awaitable
+from typing import TYPE_CHECKING, Any
 
 from livekit.agents import get_job_context
+from loguru import logger
+
+if TYPE_CHECKING:
+    from livekit.agents import AgentSession
 
 UI_TOPIC = "hospital.ui"
 
@@ -40,10 +43,21 @@ _INSECURE_DEFAULTS = {"devkey": "secret"}
 
 
 def require_real_livekit_credentials() -> tuple[str, str]:
-    """Read LIVEKIT_API_KEY/LIVEKIT_API_SECRET from the environment and
-    raise RuntimeError if either is unset or still matches LiveKit's
-    well-known --dev default pair. Returns (key, secret) so callers don't
-    need a second os.environ.get() round-trip."""
+    """Fail closed unless real, non-default LiveKit credentials are set.
+
+    Shared by main.py (the agent worker) and token_server.py (the
+    join-token minter) - see module docstring for why this must run at
+    import time in anything that mints or relies on a token.
+
+    Returns:
+        The ``(key, secret)`` pair, so callers don't need a second
+        ``os.environ.get()`` round-trip.
+
+    Raises:
+        RuntimeError: If either variable is unset, or both still match
+            LiveKit's well-known ``--dev`` default pair
+            (``devkey``/``secret``).
+    """
     key = os.environ.get("LIVEKIT_API_KEY")
     secret = os.environ.get("LIVEKIT_API_SECRET")
     if not key or not secret:
@@ -79,15 +93,33 @@ DEFAULT_FILLERS = {
 
 
 async def run_with_filler(
-    session,
+    session: AgentSession,
     awaitable: Awaitable[Any],
     *,
     filler: str,
     threshold: float = FILLER_THRESHOLD_SECS,
 ) -> Any:
-    """Await `awaitable`; if it takes longer than `threshold`, speak `filler`
-    (not added to chat context - it's presentation, not conversation) and
-    keep waiting for the real result."""
+    """Await a tool call, speaking a filler phrase only if it runs slow.
+
+    Races `awaitable` against `threshold`; if it takes longer, speaks
+    `filler` (not added to chat context - it's presentation, not
+    conversation) and keeps waiting for the real result. A fast call
+    never triggers the filler at all.
+
+    Args:
+        session: The active ``AgentSession`` to speak the filler
+            through, if needed.
+        awaitable: The tool call to run (e.g. a ``compat.*`` coroutine).
+        filler: The phrase to speak if `awaitable` is still running
+            after `threshold` seconds.
+        threshold: Seconds to wait before speaking `filler`. Defaults to
+            ``FILLER_THRESHOLD_SECS``.
+
+    Returns:
+        Whatever `awaitable` itself returns, once it completes -
+        speaking the filler never short-circuits waiting for the real
+        result.
+    """
     task = asyncio.ensure_future(awaitable)
     done, _pending = await asyncio.wait({task}, timeout=threshold)
     if not done:
@@ -100,9 +132,18 @@ async def run_with_filler(
     return await task
 
 
-async def push_ui(payload: dict) -> None:
-    """Publish a UI event to every participant in the room. Non-fatal by
-    design: a missing/closed room must never break the voice conversation."""
+async def push_ui(payload: dict[str, Any]) -> None:
+    """Publish a UI event to every participant in the room.
+
+    Non-fatal by design: a missing/closed room must never break the
+    voice conversation, so any failure is caught and logged at debug
+    level rather than raised.
+
+    Args:
+        payload: JSON-serializable dict describing the UI event (e.g.
+            ``{"type": "availability", ...}``) - see frontend/index.html
+            for the shapes it understands.
+    """
     try:
         room = get_job_context().room
         await room.local_participant.publish_data(

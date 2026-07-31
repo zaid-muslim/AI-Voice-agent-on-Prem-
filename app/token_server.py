@@ -38,10 +38,8 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-
-from livekit import api
-
 from helpers import require_real_livekit_credentials
+from livekit import api
 
 load_dotenv()
 
@@ -56,8 +54,24 @@ app = FastAPI(title="Riverside General - reception console")
 
 @app.get("/api/token")
 async def token(identity: str | None = None, room: str | None = None) -> dict:
-    """Mint a short-lived join token. One room per call keeps sessions
-    isolated; the agent worker auto-dispatches into any new room."""
+    """Mint a short-lived LiveKit room-join token for the browser frontend.
+
+    One room per call keeps sessions isolated; the agent worker
+    auto-dispatches into any new room, so callers never need to know a
+    room name up front.
+
+    Args:
+        identity: Caller identity to embed in the token. Auto-generated
+            (``caller-<8 hex chars>``) if omitted.
+        room: Room name to join. Auto-generated (``reception-<8 hex
+            chars>``) if omitted, which is the normal case - each new
+            call gets its own fresh room.
+
+    Returns:
+        A dict with the signed ``token``, the ``url`` the browser should
+        dial, and the resolved ``room``/``identity`` (echoed back so the
+        caller knows what was auto-generated).
+    """
     identity = identity or f"caller-{uuid.uuid4().hex[:8]}"
     room = room or f"reception-{uuid.uuid4().hex[:8]}"
     jwt = (
@@ -72,6 +86,11 @@ async def token(identity: str | None = None, room: str | None = None) -> dict:
 
 @app.get("/", include_in_schema=False)
 async def index() -> FileResponse:
+    """Serve the reception console's single HTML entry point.
+
+    Returns:
+        The static ``frontend/index.html`` file.
+    """
     return FileResponse(FRONTEND_DIR / "index.html")
 
 

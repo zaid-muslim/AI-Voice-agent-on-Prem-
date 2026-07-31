@@ -77,11 +77,21 @@ _VALID_TTS_ENGINES = {"qwen", "qwen_shared", "chatterbox", "kokoro", "piper"}
 _VALID_STT_ENGINES = {"whisper_shared", "whisper", "parakeet", "canary"}
 
 
-def get_config() -> dict:
-    """Read fresh from disk every call - deliberately no caching, see
+def get_config() -> dict[str, Any]:
+    """Read the current llm/stt/tts selection.
+
+    Reads fresh from disk every call - deliberately no caching, see
     module docstring. Falls back to defaults if the file is missing or
     corrupt, so the system never fails to start because of a bad config
-    file - it just falls back to a known-good default instead."""
+    file - it just falls back to a known-good default instead.
+
+    Returns:
+        A dict with ``llm``, ``stt``, and ``tts`` keys, each a small
+        object of engine/model/display_name fields (see module
+        docstring's FILE FORMAT section). Always shallow-merged over
+        ``_DEFAULT_CONFIG`` so a partially-written or older file (e.g.
+        missing a newly-added key) never crashes a caller.
+    """
     if _CONFIG_FILE.exists():
         try:
             with open(_CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -98,10 +108,21 @@ def get_config() -> dict:
     return {k: dict(v) for k, v in _DEFAULT_CONFIG.items()}
 
 
-def save_config(new_cfg: dict) -> None:
-    """Validate and atomically write a new config. Raises ValueError with a
-    human-readable message on anything invalid, so the dev UI can show the
-    developer exactly what to fix."""
+def save_config(new_cfg: dict[str, Any]) -> None:
+    """Validate and atomically write a new llm/stt/tts config.
+
+    Args:
+        new_cfg: A dict shaped like ``get_config()``'s return value -
+            ``llm``/``stt``/``tts`` keys, each with the fields
+            ``save_config`` validates below.
+
+    Raises:
+        ValueError: If any required field is missing, or an engine
+            isn't one of the known valid engines. The message lists
+            every problem found (not just the first), formatted as a
+            human-readable bullet list so the dev UI can show the
+            developer exactly what to fix.
+    """
     problems = []
 
     llm = new_cfg.get("llm", {})
@@ -139,12 +160,21 @@ def save_config(new_cfg: dict) -> None:
     tmp.replace(_CONFIG_FILE)  # atomic swap, same pattern as hospital_kb.save_kb
 
 
-def combo_key(cfg: dict | None = None) -> str:
-    """A short, stable string identifying the CURRENT (or given) llm+stt+tts
-    combination - used to tag latency log entries so different
-    combinations can be compared later. Deliberately just the engine/model
-    identifiers, not the display names, so it stays stable even if display
-    text is edited."""
+def combo_key(cfg: dict[str, Any] | None = None) -> str:
+    """Build a short, stable identifier for an llm+stt+tts combination.
+
+    Used to tag latency log entries so different combinations can be
+    compared later. Deliberately built from just the engine/model
+    identifiers, not the display names, so it stays stable even if
+    display text is edited.
+
+    Args:
+        cfg: A config dict shaped like ``get_config()``'s return value.
+            Defaults to the current on-disk config if omitted.
+
+    Returns:
+        A string of the form ``"llm=...|stt=engine:model|tts=engine:model"``.
+    """
     cfg = cfg or get_config()
     return (
         f"llm={cfg['llm']['served_model_name']}"
@@ -153,11 +183,19 @@ def combo_key(cfg: dict | None = None) -> str:
     )
 
 
-def load_registry() -> dict:
-    """Load the curated list of known-good/candidate models and STT/TTS
-    engine+model combinations the dev UI offers as choices. See
-    models_registry.json's own comments for what "verified" vs
-    "candidate" means, and the real license findings noted per entry."""
+def load_registry() -> dict[str, Any]:
+    """Load the curated list of selectable model/engine combinations.
+
+    See models_registry.json's own comments for what "verified" vs
+    "candidate" means, and the real license findings noted per entry.
+
+    Returns:
+        The parsed contents of ``models_registry.json``.
+
+    Raises:
+        OSError: If ``models_registry.json`` is missing or unreadable.
+        json.JSONDecodeError: If it exists but isn't valid JSON.
+    """
     registry_file = Path(__file__).parent / "models_registry.json"
     with open(registry_file, "r", encoding="utf-8") as f:
         return json.load(f)
