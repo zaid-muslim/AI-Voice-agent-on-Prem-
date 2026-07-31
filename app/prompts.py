@@ -22,14 +22,41 @@ remove one without knowing which failure it guards against:
     layer misses - safety.py's own docstring names this two-layer design.
 """
 
-from datetime import date
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 EMERGENCY_NUMBER = "1122"  # keep consistent with hospital_core/safety.py
 HOSPITAL_NAME = "Riverside General Hospital"
 
+# REAL BUG, found live 2026-07-30, same class as hospital_core/booking.py's
+# HOSPITAL_TZ fix (see that file's comment for the live incident): this
+# used to compute "today" via date.today(), the CONTAINER's naive system
+# clock - not the hospital's real timezone. Since this deployment's
+# container runs on UTC while real callers are in Pakistan (UTC+5), for
+# roughly 5 hours of every day (19:00-23:59 UTC = 00:00-04:59 next day in
+# Pakistan) the injected TODAY'S DATE would have been a full day BEHIND
+# the caller's actual local date - directly wrong input to every
+# "today"/"tomorrow" conversion the model does before calling a tool.
+# Not imported from hospital_core.booking.HOSPITAL_TZ - app/ and
+# hospital_core/ are deliberately loosely coupled elsewhere in this
+# codebase (see compat.py's sys.path-based import instead of a normal
+# package import), so this is a small, intentional duplication rather
+# than a new cross-module dependency.
+HOSPITAL_TZ = ZoneInfo("Asia/Karachi")
+
 
 def build_system_prompt() -> str:
-    today = date.today()
+    """Build the full system prompt for the RiversideReceptionist agent.
+
+    Injects the hospital's real current local date (see HOSPITAL_TZ)
+    so the model can convert "today"/"tomorrow"/weekday-name phrasing
+    into the literal YYYY-MM-DD strings the booking tools require.
+
+    Returns:
+        The complete system prompt string, ready to pass as an
+        ``Agent``'s ``instructions``.
+    """
+    today = datetime.now(HOSPITAL_TZ).date()
     return f"""You are the telephone receptionist for {HOSPITAL_NAME}. You are
 speaking with callers on a live voice line.
 
