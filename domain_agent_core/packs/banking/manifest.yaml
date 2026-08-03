@@ -1,0 +1,70 @@
+# Banking domain pack - the second proof point: a genuinely different
+# vertical (different tools, different safety rules, different compliance
+# profile) on the exact same core/ runtime as the hospital pack.
+domain_id: banking
+display_name: "Meridian Bank Telephone Assistant"
+agent_name: banking-agent
+timezone: "America/New_York"
+
+persona:
+  template_path: "persona.jinja2"
+  greeting_template: >
+    Greet the caller warmly in one short sentence as {{ bank_name }}'s
+    telephone assistant, and ask how you can help with their account
+    today. Do not list your capabilities.
+  variables:
+    bank_name: "Meridian Bank"
+    fraud_hotline: "1-800-555-0142"
+
+engines:
+  llm:
+    served_model_name: "gemma-4-12b"
+    source: "models/gemma-4-12b-w4a16"
+    display_name: "Gemma 4 12B (w4a16)"
+  stt:
+    engine: "whisper_shared"
+    model: "distil-large-v3"
+    display_name: "Whisper distil-large-v3 (shared)"
+  tts:
+    engine: "qwen"
+    model: "aiden"
+    display_name: "Qwen TTS (aiden voice)"
+
+tools:
+  module: "domain_agent_core.packs.banking.tools"
+  allow_list:
+    - check_balance
+    - transfer_funds
+    - dispute_transaction
+    - report_fraud
+    - find_branch
+
+safety:
+  module: "domain_agent_core.packs.banking.safety_policy"
+
+filler:
+  phrases:
+    - "One moment, pulling that up."
+    - "Let me check that for you."
+    - "Just a second."
+  per_tool:
+    check_balance: "One moment, let me pull up your account."
+    transfer_funds: "Just a second while I process that transfer."
+    dispute_transaction: "Let me look into that transaction for you."
+    report_fraud: "I'm flagging this right away, one moment."
+    find_branch: "Let me find that for you."
+
+recap:
+  labels:
+    - [account_last4, "account last 4"]
+    - [transaction_id, "transaction id"]
+    - [amount, "amount"]
+    - [branch_query, "branch location"]
+
+kb:
+  directory: "kb"
+
+compliance:
+  profile: pci_dss_glba
+
+strip_thinking_channel: true

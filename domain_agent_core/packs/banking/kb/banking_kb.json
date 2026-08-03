@@ -1,0 +1,44 @@
+[
+  {
+    "id": "hours",
+    "category": "hours",
+    "title": "Branch hours",
+    "text": "Branches are open Monday through Friday, 9 AM to 5 PM, and Saturday 9 AM to 1 PM. Online and phone banking are available 24 hours a day."
+  },
+  {
+    "id": "branch_downtown",
+    "category": "branches",
+    "title": "Downtown branch",
+    "text": "The Downtown branch is at 100 Main Street, with a drive-through ATM available 24 hours a day."
+  },
+  {
+    "id": "branch_riverside",
+    "category": "branches",
+    "title": "Riverside branch",
+    "text": "The Riverside branch is at 450 River Road, next to the public library, with free customer parking."
+  },
+  {
+    "id": "fees_overdraft",
+    "category": "fees",
+    "title": "Overdraft fee policy",
+    "text": "An overdraft fee of 35 dollars applies per item if an account balance goes below zero, up to a maximum of 3 fees per day."
+  },
+  {
+    "id": "fees_wire",
+    "category": "fees",
+    "title": "Wire transfer fees",
+    "text": "Outgoing domestic wire transfers cost 25 dollars. Outgoing international wire transfers cost 45 dollars. Incoming wires are free."
+  },
+  {
+    "id": "dispute_policy",
+    "category": "policy",
+    "title": "Transaction dispute policy",
+    "text": "Disputed transactions are reviewed within 5 business days. Provisional credit may be issued within 10 business days while the investigation continues."
+  },
+  {
+    "id": "lost_card",
+    "category": "policy",
+    "title": "Lost or stolen card policy",
+    "text": "A lost or stolen card is cancelled immediately upon report and a replacement is mailed within 5 to 7 business days, or available same-day at any branch."
+  }
+]

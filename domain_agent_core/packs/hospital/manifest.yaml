@@ -1,0 +1,72 @@
+# Hospital domain pack - Phase 0 regression baseline. Ports
+# RiversideReceptionist (app/main.py) onto the generic domain_agent_core
+# runtime, importing app/hospital_core/* directly so behavior stays
+# bit-for-bit identical to the existing hospital pipeline.
+domain_id: hospital
+display_name: "Riverside General Hospital Receptionist"
+agent_name: hospital-receptionist
+timezone: "Asia/Karachi"
+
+persona:
+  template_path: "persona.jinja2"
+  greeting_template: >
+    Greet the caller warmly in one short sentence as the front desk of
+    {{ hospital_name }}, and ask how you can help them today. Do not list
+    your capabilities.
+  variables:
+    hospital_name: "Riverside General Hospital"
+    emergency_number: "1122"
+
+engines:
+  llm:
+    served_model_name: "gemma-4-12b"
+    source: "models/gemma-4-12b-w4a16"
+    display_name: "Gemma 4 12B (w4a16)"
+  stt:
+    engine: "whisper_shared"
+    model: "distil-large-v3"
+    display_name: "Whisper distil-large-v3 (shared)"
+  tts:
+    engine: "qwen"
+    model: "aiden"
+    display_name: "Qwen TTS (aiden voice)"
+
+tools:
+  module: "domain_agent_core.packs.hospital.tools"
+  allow_list:
+    - check_availability
+    - book_appointment
+    - cancel_appointment
+    - update_appointment
+    - search_hospital_info
+
+safety:
+  module: "domain_agent_core.packs.hospital.safety_policy"
+
+filler:
+  phrases:
+    - "Mm-hmm, one moment."
+    - "Let me check that for you."
+    - "Just a second."
+  per_tool:
+    check_availability: "One moment, let me check the schedule for you."
+    book_appointment: "Just a second while I book that for you."
+    cancel_appointment: "One moment while I pull up that appointment."
+    update_appointment: "Let me update that for you, one moment."
+    search_hospital_info: "Let me look that up for you."
+
+recap:
+  labels:
+    - [patient_name, "patient name"]
+    - [department, "department"]
+    - [doctor, "doctor"]
+    - [date, "date"]
+    - [time, "time"]
+
+kb:
+  directory: null  # Phase 0: real KB stays in app/hospital_core/hospital_kb.py, via tools.py's compat import
+
+compliance:
+  profile: hipaa
+
+strip_thinking_channel: true

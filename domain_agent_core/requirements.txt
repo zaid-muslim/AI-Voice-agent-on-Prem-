@@ -1,0 +1,5 @@
+# Additional deps beyond app/requirements.txt (already installed by the
+# shared base image) - only what domain_agent_core itself needs that the
+# hospital pipeline doesn't: YAML manifests and Jinja2 persona templates.
+pyyaml>=6.0
+jinja2>=3.1

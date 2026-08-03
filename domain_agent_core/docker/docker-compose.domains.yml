@@ -1,0 +1,106 @@
+# domain_agent_core's multi-domain deployment - layers ON TOP of the
+# existing docker/docker-compose.yml (same shared livekit-server/vllm
+# services, referenced by name across files), adding one worker + one
+# call-server pair per domain pack, each under its own Compose profile so
+# you can run any subset - or all of them - at once:
+#
+#   docker compose -f docker/docker-compose.yml \
+#     -f domain_agent_core/docker/docker-compose.domains.yml \
+#     --profile hospital --profile banking up -d --build
+#
+# Mirrors docker/docker-compose.yml's own cascade/direct-audio profile
+# split exactly: each domain's worker sets a unique agent_name (LiveKit
+# explicit dispatch - see direct_audio_agent/agent.py's proven precedent),
+# so hospital-agent and banking-agent can never steal each other's room,
+# even running simultaneously. Same GPU-contention caveat that file's own
+# comments already measured for its pair (Silero VAD falling behind
+# realtime, GPU memory pressure) applies here too if you run every
+# profile together on a single card - measure before assuming it's free.
+#
+# PATH GOTCHA, confirmed live via `docker compose ... config`: when
+# multiple -f files are combined, Compose resolves every relative path in
+# EVERY file against the FIRST file's directory (the "project directory"),
+# not each file's own location - NOT documented anywhere obvious, found
+# by a failing `env file .../app/.env not found` error pointing one
+# directory too high. Since docker/docker-compose.yml is always passed
+# first in the run command above, every relative path here is written as
+# if this file lived in docker/ too (e.g. `../app/.env`, `context: ..`),
+# even though it physically lives in domain_agent_core/docker/.
+services:
+  hospital-agent:
+    build:
+      context: ..
+      dockerfile: domain_agent_core/docker/domain-agent.Dockerfile
+    profiles: ["hospital"]
+    command: ["python3", "worker.py", "start"]
+    env_file:
+      - ../app/.env
+    environment:
+      - DOMAIN_PACK=hospital
+      - VLLM_BASE_URL=http://vllm:8000/v1
+      - SHARED_STT_BASE_URL=http://stt-service:8020
+      - SHARED_TTS_BASE_URL=http://tts-service:8021
+      - LIVEKIT_URL=ws://livekit-server:7880
+    volumes:
+      - ../app/hospital_core:/srv/app/hospital_core
+    depends_on:
+      livekit-server:
+        condition: service_started
+      vllm:
+        condition: service_healthy
+    restart: unless-stopped
+
+  hospital-call-server:
+    build:
+      context: ..
+      dockerfile: domain_agent_core/docker/domain-agent.Dockerfile
+    profiles: ["hospital"]
+    command: ["python3", "call_server.py"]
+    env_file:
+      - ../app/.env
+    environment:
+      - DOMAIN_PACK=hospital
+      - LIVEKIT_URL=ws://livekit-server:7880
+    ports:
+      - "7863:7863"
+    depends_on:
+      - livekit-server
+    restart: unless-stopped
+
+  banking-agent:
+    build:
+      context: ..
+      dockerfile: domain_agent_core/docker/domain-agent.Dockerfile
+    profiles: ["banking"]
+    command: ["python3", "worker.py", "start"]
+    env_file:
+      - ../app/.env
+    environment:
+      - DOMAIN_PACK=banking
+      - VLLM_BASE_URL=http://vllm:8000/v1
+      - SHARED_STT_BASE_URL=http://stt-service:8020
+      - SHARED_TTS_BASE_URL=http://tts-service:8021
+      - LIVEKIT_URL=ws://livekit-server:7880
+    depends_on:
+      livekit-server:
+        condition: service_started
+      vllm:
+        condition: service_healthy
+    restart: unless-stopped
+
+  banking-call-server:
+    build:
+      context: ..
+      dockerfile: domain_agent_core/docker/domain-agent.Dockerfile
+    profiles: ["banking"]
+    command: ["python3", "call_server.py"]
+    env_file:
+      - ../app/.env
+    environment:
+      - DOMAIN_PACK=banking
+      - LIVEKIT_URL=ws://livekit-server:7880
+    ports:
+      - "7864:7864"
+    depends_on:
+      - livekit-server
+    restart: unless-stopped
