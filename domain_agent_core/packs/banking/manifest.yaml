@@ -1,20 +1,23 @@
-# Banking domain pack - the second proof point: a genuinely different
-# vertical (different tools, different safety rules, different compliance
-# profile) on the exact same core/ runtime as the hospital pack.
+# Banking domain pack - the real HBL telephone-banking agent, ported from
+# the sibling Livekit Pipeline repo (see PLAN_real_banking_domain_pack.md
+# at the repo root). Replaces the earlier "Meridian Bank" synthetic proof
+# point. Engines are reused as-is from that synthetic pack (Gemma-4-12B +
+# whisper_shared + qwen) - already verified on this platform's hardware,
+# not the real deployment's own vLLM/Qwen2.5-14B-AWQ + Chatterbox stack.
 domain_id: banking
-display_name: "Meridian Bank Telephone Assistant"
+display_name: "HBL Telephone Banking Assistant"
 agent_name: banking-agent
-timezone: "America/New_York"
+timezone: "Asia/Karachi"
 
 persona:
   template_path: "persona.jinja2"
   greeting_template: >
     Greet the caller warmly in one short sentence as {{ bank_name }}'s
-    telephone assistant, and ask how you can help with their account
-    today. Do not list your capabilities.
+    telephone assistant, and ask how you can help them today. Do not
+    list your capabilities.
   variables:
-    bank_name: "Meridian Bank"
-    fraud_hotline: "1-800-555-0142"
+    bank_name: "HBL"
+    customer_care_number: "111-111-425"
 
 engines:
   llm:
@@ -33,11 +36,9 @@ engines:
 tools:
   module: "domain_agent_core.packs.banking.tools"
   allow_list:
-    - check_balance
-    - transfer_funds
-    - dispute_transaction
-    - report_fraud
-    - find_branch
+    - block_card
+    - request_human_handoff
+    - search_business_docs
 
 safety:
   module: "domain_agent_core.packs.banking.safety_policy"
@@ -48,18 +49,13 @@ filler:
     - "Let me check that for you."
     - "Just a second."
   per_tool:
-    check_balance: "One moment, let me pull up your account."
-    transfer_funds: "Just a second while I process that transfer."
-    dispute_transaction: "Let me look into that transaction for you."
-    report_fraud: "I'm flagging this right away, one moment."
-    find_branch: "Let me find that for you."
+    block_card: "One moment, let me verify a few details first."
+    request_human_handoff: "One moment, I'm connecting you with a representative."
+    search_business_docs: "Let me check that for you."
 
 recap:
   labels:
-    - [account_last4, "account last 4"]
-    - [transaction_id, "transaction id"]
-    - [amount, "amount"]
-    - [branch_query, "branch location"]
+    - [card_last4, "card last 4"]
 
 kb:
   directory: "kb"

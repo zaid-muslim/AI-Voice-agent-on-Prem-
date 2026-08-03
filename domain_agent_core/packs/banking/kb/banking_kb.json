@@ -3,42 +3,168 @@
     "id": "hours",
     "category": "hours",
     "title": "Branch hours",
-    "text": "Branches are open Monday through Friday, 9 AM to 5 PM, and Saturday 9 AM to 1 PM. Online and phone banking are available 24 hours a day."
+    "text": "Branches are open Monday to Thursday 9 AM to 5 PM, Friday 9 AM to 6 PM with a lunch break 1 to 2:30 PM, and Saturday 9 AM to 1:30 PM at selected branches only. Closed Sunday."
   },
   {
-    "id": "branch_downtown",
+    "id": "hours_ramadan",
+    "category": "hours",
+    "title": "Ramadan hours",
+    "text": "During Ramadan, hours are typically 8 AM to 1:45 PM Monday to Thursday, and 8 AM to 12:30 PM on Friday. Exact hours can vary by branch."
+  },
+  {
+    "id": "branch_islamabad",
     "category": "branches",
-    "title": "Downtown branch",
-    "text": "The Downtown branch is at 100 Main Street, with a drive-through ATM available 24 hours a day."
+    "title": "Islamabad Corporate Centre",
+    "text": "HBL Islamabad Corporate Centre is at HBL Tower, Jinnah Avenue, Blue Area, Islamabad. Phone (051) 2872203."
   },
   {
-    "id": "branch_riverside",
+    "id": "branch_karachi",
     "category": "branches",
-    "title": "Riverside branch",
-    "text": "The Riverside branch is at 450 River Road, next to the public library, with free customer parking."
+    "title": "Head Office, Karachi",
+    "text": "HBL Head Office is at HBL Tower, Plot G-4, KDA Scheme 5, Block 7, Clifton, Karachi. Phone (021) 33116030."
   },
   {
-    "id": "fees_overdraft",
-    "category": "fees",
-    "title": "Overdraft fee policy",
-    "text": "An overdraft fee of 35 dollars applies per item if an account balance goes below zero, up to a maximum of 3 fees per day."
+    "id": "savings_pls",
+    "category": "accounts",
+    "title": "PLS Savings Account",
+    "text": "The HBL PLS Savings Account has no minimum balance requirement and unlimited transactions. Profit is calculated monthly and paid out semi-annually. Confirm the current profit rate via customer care, as it changes periodically."
   },
   {
-    "id": "fees_wire",
-    "category": "fees",
-    "title": "Wire transfer fees",
-    "text": "Outgoing domestic wire transfers cost 25 dollars. Outgoing international wire transfers cost 45 dollars. Incoming wires are free."
+    "id": "savings_value",
+    "category": "accounts",
+    "title": "Value Account",
+    "text": "The HBL Value Account is a higher-return savings account requiring a PKR 40,000 average monthly balance. Profit is paid quarterly, tiered by deposit amount. Only one may be opened per CNIC."
   },
   {
-    "id": "dispute_policy",
-    "category": "policy",
-    "title": "Transaction dispute policy",
-    "text": "Disputed transactions are reviewed within 5 business days. Provisional credit may be issued within 10 business days while the investigation continues."
+    "id": "current_conventional",
+    "category": "accounts",
+    "title": "Conventional Current Account",
+    "text": "The HBL Conventional Current Account allows unlimited transactions with no profit paid, for customers with frequent day-to-day banking activity."
   },
   {
-    "id": "lost_card",
-    "category": "policy",
-    "title": "Lost or stolen card policy",
-    "text": "A lost or stolen card is cancelled immediately upon report and a replacement is mailed within 5 to 7 business days, or available same-day at any branch."
+    "id": "current_basic",
+    "category": "accounts",
+    "title": "Basic Banking Account",
+    "text": "The HBL Basic Banking Account is a simple account for minimal transactional needs, with unlimited free ATM withdrawals on HBL's own network and 2 free over-the-counter withdrawals per month."
+  },
+  {
+    "id": "current_asaan",
+    "category": "accounts",
+    "title": "Asaan Account",
+    "text": "The HBL Asaan Account is a simplified current account for new-to-bank individuals aged 18+, opened with just a CNIC or SNIC. No profit is paid, as it's a current account."
+  },
+  {
+    "id": "account_rutba",
+    "category": "accounts",
+    "title": "Rutba senior citizen account",
+    "text": "HBL Rutba is a conventional savings account for senior citizens aged 55 and above, with no minimum balance, monthly profit payout, and a free first cheque book."
+  },
+  {
+    "id": "account_nisa",
+    "category": "accounts",
+    "title": "Nisa women's accounts",
+    "text": "HBL Nisa is a family of conventional accounts for women: Nisa Savings, Nisa Asaan (simplified current account for new-to-bank women), and Nisa Plus (full current account). Ask which one a caller means."
+  },
+  {
+    "id": "credit_card_tiers",
+    "category": "cards",
+    "title": "Credit card tiers",
+    "text": "HBL offers Platinum, Gold, Green, and FuelSaver CreditCards. Platinum includes airport lounge access and travel benefits; Gold and Green offer reward points; FuelSaver gives cashback on fuel purchases."
+  },
+  {
+    "id": "credit_card_fees",
+    "category": "cards",
+    "title": "Credit card annual fees",
+    "text": "Annual credit card fees range roughly from PKR 1,500 to PKR 12,000 depending on tier, with fee reversal available if annual spend thresholds are met. Confirm exact fees against the current Key Fact Sheet."
+  },
+  {
+    "id": "credit_card_markup",
+    "category": "cards",
+    "title": "Credit card markup rate",
+    "text": "The markup rate on outstanding credit card balances is approximately 3.5% per month, subject to State Bank of Pakistan regulation and periodic revision."
+  },
+  {
+    "id": "credit_card_lost",
+    "category": "cards",
+    "title": "Lost or stolen credit card",
+    "text": "Report a lost or stolen card immediately to HBL PhoneBanking on 111-111-425 to secure the account against unauthorized transactions."
+  },
+  {
+    "id": "personal_loan",
+    "category": "loans",
+    "title": "Personal loan overview",
+    "text": "The HBL Personal Loan is unsecured, from PKR 25,000 to PKR 3,000,000, for salaried customers with salary credited to an HBL account, aged 21 to 61, minimum salary PKR 35,000 per month."
+  },
+  {
+    "id": "personal_loan_terms",
+    "category": "loans",
+    "title": "Personal loan rate and repayment",
+    "text": "Personal loan interest is up to 35.99% per annum depending on the applicant's profile, repayable over 12, 24, 36, 48, or 60 months. Pensioners are eligible up to PKR 1,000,000."
+  },
+  {
+    "id": "islamic_overview",
+    "category": "islamic",
+    "title": "Islamic banking overview",
+    "text": "HBL Sadiq offers Shariah-compliant banking approved by HBL's Shariah Board. Describe returns as profit rate or profit-sharing ratio, never as interest, since these products avoid conventional interest."
+  },
+  {
+    "id": "islamic_accounts",
+    "category": "islamic",
+    "title": "Islamic accounts",
+    "text": "Islamic savings options include the HBL Islamic PLS, Uraan, and Mahana Amdan accounts. Islamic term deposits use the Mudaraba principle, sharing profit between customer and bank per an agreed ratio."
+  },
+  {
+    "id": "islamic_financing",
+    "category": "islamic",
+    "title": "Islamic personal financing",
+    "text": "HBL Islamic Consumer Financing is a Shariah-compliant alternative to a conventional personal loan, structured as Murabaha or a similar Islamic financing arrangement rather than interest-based lending."
+  },
+  {
+    "id": "digital_mobile_app",
+    "category": "digital",
+    "title": "HBL Mobile app",
+    "text": "The HBL Mobile app supports fund transfers, bill payments, statements, card blocking and unblocking, Zakat payments, QR payments, and setting personal transaction limits."
+  },
+  {
+    "id": "digital_internet_banking",
+    "category": "digital",
+    "title": "Internet Banking and PhoneBanking",
+    "text": "HBL Internet Banking offers the same self-service features as the mobile app via a web browser. HBL PhoneBanking on 111-111-425 handles card reporting, account queries, and complaints."
+  },
+  {
+    "id": "remittance_fasttransfer",
+    "category": "remittance",
+    "title": "HBL FastTransfer",
+    "text": "HBL FastTransfer lets Pakistanis abroad send money home free of charge to the sender. Beneficiaries collect cash at any HBL branch without needing an account, or receive it by deposit."
+  },
+  {
+    "id": "remittance_contact",
+    "category": "remittance",
+    "title": "Remittance contact and tracking",
+    "text": "Track a remittance with the HBL Remittance Tracker using the transaction reference number. For remittance-specific queries call 021-111-555-425 or email home.remittance@hbl.com."
+  },
+  {
+    "id": "faq_lost_card",
+    "category": "faq",
+    "title": "Reporting a lost card",
+    "text": "If you lose your card, report it immediately to HBL PhoneBanking on 111-111-425. The account is secured against unauthorized use on that card as soon as it's reported."
+  },
+  {
+    "id": "faq_complaint",
+    "category": "faq",
+    "title": "Filing a complaint",
+    "text": "File a complaint by texting comp plus your CNIC to 4250, emailing customer.complaints@hbl.com, using the online form, or calling 111-111-425. A reference number is issued within 2 working days."
+  },
+  {
+    "id": "faq_account_opening",
+    "category": "faq",
+    "title": "Documents to open an account",
+    "text": "Opening an account requires a valid CNIC or SNIC for resident Pakistanis, or a NICOP or POC for overseas Pakistanis. Some accounts require additional proof of income."
+  },
+  {
+    "id": "faq_contact",
+    "category": "faq",
+    "title": "General contact numbers",
+    "text": "Customer care and PhoneBanking: 111-111-425. Complaints: customer.complaints@hbl.com. Remittance queries: 021-111-555-425 or home.remittance@hbl.com."
   }
 ]

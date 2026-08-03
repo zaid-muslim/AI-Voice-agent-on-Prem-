@@ -1,14 +1,24 @@
-"""Banking safety policy - the second proof point for the safety-gate
-engine: same ``core.safety_gate`` matching logic as the hospital pack,
-completely different rule content.
+"""Banking safety policy for the real HBL telephone-banking agent.
 
-``duress`` is the genuinely new requirement this domain surfaces that
-hospital never needed: a caller being forced to withdraw/transfer under
-threat must never hear a spoken "I'm alerting security" - that could tip
-off a listening attacker. This pack marks ``duress`` as a candidate for
-``escalate_silently`` (actually enabled via the pack's ``pci_dss_glba``
-compliance profile's ``silent_escalation_categories``, resolved by
-``AgentAssembler.assemble()`` - see ``core/compliance_profiles.py``).
+The real ``Livekit Pipeline`` system had no dedicated safety-gate module -
+its only deterministic guardrail was an OUTPUT-side regex
+(``asserts_block_success`` in ``src/banking.py``) checking the model never
+*claimed* a card was blocked. This module instead lifts the Meridian demo
+pack's INPUT-side safety-gate structure (fraud / account-takeover /
+duress, via ``core.safety_gate``) and fills it with content genuinely
+suited to this agent's real, narrower scope: it can verify identity and
+block a card or queue a human callback - it cannot freeze an account or
+investigate a dispute the way the synthetic Meridian pack's tools could.
+Every escalation message below only ever promises what this agent can
+actually do (verify-then-block, or hand off to a human), never a
+completed action its own tools didn't perform.
+
+``duress`` is kept as a silent-escalation category (a caller being forced
+to hand over card/verification details under threat must never hear a
+spoken "I'm alerting security" - that could tip off a listening
+attacker), actually enabled via this pack's ``pci_dss_glba`` compliance
+profile's ``silent_escalation_categories`` (see ``core/compliance_profiles.py``),
+resolved by ``AgentAssembler.assemble()``.
 """
 
 from __future__ import annotations
@@ -19,28 +29,26 @@ from domain_agent_core.core.safety_gate import (
     compile_patterns,
 )
 
-FRAUD_HOTLINE_MESSAGE = (
-    "I've flagged this as suspected fraud and frozen the account right "
-    "away. A fraud specialist will call you back shortly. If you notice "
-    "any other unauthorized activity, please call our fraud hotline "
-    "immediately."
+FRAUD_MESSAGE = (
+    "I understand your card may have been used without your permission. "
+    "I can block it right away once we verify a couple of details "
+    "together, starting with the last 4 digits of the card."
 )
 
 ACCOUNT_TAKEOVER_MESSAGE = (
     "This sounds like your account security may have been compromised. "
-    "I'm flagging this for our security team right now, and I'd recommend "
-    "changing your online banking password as soon as we're done here."
+    "I'm connecting you with a specialist who can help secure your "
+    "account right away."
 )
 
-# Deliberately empty spoken message: a duress call must escalate SILENTLY
-# (see module docstring) - AgentAssembler wires escalate_silently=True for
-# this kind via the pci_dss_glba compliance profile, so whatever message
-# lives here is never actually spoken; kept non-empty only so a
-# misconfigured deployment (compliance profile accidentally set to
-# "none") still says something rather than silently ghosting the caller.
-DURESS_MESSAGE = (
-    "I understand. I'm going to continue speaking normally with you now."
-)
+# Deliberately reassuring, non-committal message: a duress call must
+# escalate SILENTLY (see module docstring) - AgentAssembler wires
+# escalate_silently=True for this kind via the pci_dss_glba compliance
+# profile, so whatever message lives here is never actually spoken; kept
+# non-empty only so a misconfigured deployment (compliance profile
+# accidentally set to "none") still says something rather than silently
+# ghosting the caller.
+DURESS_MESSAGE = "I understand. I'm going to continue speaking normally with you now."
 
 POLICY = SafetyPolicy(
     rules=(
@@ -51,7 +59,8 @@ POLICY = SafetyPolicy(
                 [
                     r"someone (is|just) (using|used) my (card|account)",
                     r"unauthorized (charge|transaction|withdrawal)",
-                    r"my card (was|got) stolen",
+                    r"my card (was|got) (stolen|lost)",
+                    r"i (lost|misplaced) my card",
                     r"i (didn'?t|did not) make (that|this) (charge|purchase|transaction)",
                 ]
             ),
@@ -61,10 +70,10 @@ POLICY = SafetyPolicy(
             kind="account_takeover",
             patterns=compile_patterns(
                 [
-                    r"i (didn'?t|did not) (make|request) this (transfer|change)",
                     r"my (password|pin) (was|got) changed and i didn'?t",
                     r"someone (else )?logged into my account",
-                    r"i'?ve been locked out of my (account|online banking)",
+                    r"i'?ve been locked out of my (account|online banking|mobile app)",
+                    r"someone (else )?has access to my account",
                 ]
             ),
         ),
@@ -74,7 +83,7 @@ POLICY = SafetyPolicy(
             patterns=compile_patterns(
                 [
                     r"there'?s someone (here )?forcing me",
-                    r"i'?m being (forced|told) to (withdraw|transfer)",
+                    r"i'?m being (forced|told) to (give|hand over|share)",
                     r"someone is making me (do this|call you)",
                     r"i can'?t talk freely right now",
                 ]
@@ -82,31 +91,33 @@ POLICY = SafetyPolicy(
         ),
     ),
     escalation_messages={
-        "fraud": FRAUD_HOTLINE_MESSAGE,
+        "fraud": FRAUD_MESSAGE,
         "account_takeover": ACCOUNT_TAKEOVER_MESSAGE,
         "duress": DURESS_MESSAGE,
     },
 )
 
 # Deliberate negatives included alongside positives, same discipline as
-# hospital_core/safety.py's own self-test (a naive matcher would get
-# these wrong).
+# the Meridian demo pack's own self-test (a naive matcher would get these
+# wrong) - and matching the real system's own guardrail test style
+# (Livekit Pipeline/tests/test_banking.py's request-vs-claim distinction).
 TEST_CASES: list[tuple[str, bool]] = [
     ("someone is using my card right now", True),
-    ("there's an unauthorized charge on my statement", True),
     ("my card was stolen yesterday", True),
-    ("I didn't make this transfer, please help", True),
+    ("I lost my card at the market", True),
+    ("I didn't make this transaction, please help", True),
     ("my password was changed and I didn't do it", True),
     ("someone logged into my account without permission", True),
-    ("there's someone here forcing me to withdraw cash", True),
-    ("I'm being told to transfer money right now", True),
+    ("I've been locked out of my mobile app", True),
+    ("there's someone here forcing me to do this", True),
+    ("I'm being forced to hand over my details", True),
     # deliberate negatives
-    ("my card is in my wallet, I just want to check the balance", False),
-    ("I want to transfer money to my savings account", False),
-    ("can you help me dispute an old transaction", False),
-    ("I forgot my password, can you help me reset it", False),
+    ("my card is in my wallet, I just want to block it as a precaution", False),
+    ("can you block my card please", False),
+    ("I want to talk to a human representative", False),
     ("what are your branch hours", False),
-    ("I'd like to report that I'm moving to a new address", False),
+    ("what's the profit rate on the savings account", False),
+    ("I forgot my mother's maiden name, can you remind me", False),
 ]
 
 
